@@ -3,8 +3,12 @@
 
 const getToken = (env) => env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
 const apiBase = (env) => `https://api.telegram.org/bot${getToken(env)}/`;
-// Fixed admin ID as requested
-const getAdminId = (env) => 8009067953;
+// Admin ID from environment (fallback to fixed if not provided)
+const getAdminId = (env) => {
+  const fromEnv = Number(env.ADMIN_TELEGRAM_ID);
+  if (fromEnv && Number.isFinite(fromEnv)) return fromEnv;
+  return 8009067953; // fallback
+};
 
 async function tg(env, method, payload) {
   const res = await fetch(apiBase(env) + method, {
@@ -70,7 +74,7 @@ function renderTopupMenu(env, state, userId) {
 }
 
 function renderTopupInstruction(amount, env) {
-  const text = `لطفاً مبلغ <b>${formatToman(amount)}</b> را به کارت زیر واریز کنید و سپس تصویر رسید را ارسال نمایید:\n\nکارت: <code>${CARD_NUMBER}</code>\nبه نام: <b>${CARD_OWNER_NAME(env)}</b>`;
+  const text = `لطفاً مبلغ <b>${formatToman(amount)}</b> را به کارت زیر واریز کنید و سپس تصویر رسید را ارسال نمایید:\n\nکارت:\n<code>${CARD_NUMBER}</code>\nبه نام: <b>${CARD_OWNER_NAME(env)}</b>`;
   const kb = {
     inline_keyboard: [
       [ { text: 'پرداخت کردم و رسید دارم', callback_data: `topup:await:${amount}` } ],
@@ -86,6 +90,7 @@ function renderAdminMenu(env) {
     inline_keyboard: [
       [ { text: 'درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
       [ { text: 'آمار و وضعیت', callback_data: 'admin:stats' } ],
+      [ { text: 'مدیریت موجودی کاربر', callback_data: 'admin:bal' } ],
       [ { text: 'بازگشت به منو', callback_data: 'menu:main' } ],
     ],
   };
@@ -176,7 +181,7 @@ const APN_OPTIONS = [
   { value: 'mtnirancell', label: 'Irancell 🟡' },
   { value: 'RighTel', label: 'RighTel 🟣' },
   { value: 'ApTel', label: 'Aptel 🔴' },
-  { value: 'shatelmobile', label: 'SHATEL' },
+  { value: 'shatelmobile', label: 'SHATEL ⚪️' },
 ];
 
 // Billing and Admin
@@ -462,6 +467,53 @@ async function handleMessage(env, msg) {
   const userId = msg.from?.id;
   if (userId) {
     const state = await getUserState(env, userId);
+    // Track last chat id for possible notifications
+    state.last_chat_id = chatId;
+    // Admin balance adjust flow (awaiting inputs)
+    if (state.awaiting_admin && typeof msg.text === 'string') {
+      const adminId = getAdminId(env);
+      if (adminId && adminId === userId) {
+        const s = state.awaiting_admin;
+        const text = (msg.text || '').trim();
+        if (s.step === 'user') {
+          const targetId = Number(text);
+          if (!targetId || !Number.isFinite(targetId)) {
+            return tg(env, 'sendMessage', { chat_id: chatId, text: 'شناسه کاربر نامعتبر است. یک عدد ارسال کنید یا لغو کنید.', reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
+          }
+          s.targetUserId = targetId;
+          s.step = 'amount';
+          state.awaiting_admin = s;
+          await setUserState(env, userId, state);
+          return tg(env, 'sendMessage', { chat_id: chatId, text: `مبلغ را به تومان وارد کنید (${s.mode === 'inc' ? 'افزایش' : 'کاهش'}):`, reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
+        } else if (s.step === 'amount') {
+          const amount = Math.max(0, Math.floor(Number(text) || 0));
+          if (!amount) {
+            return tg(env, 'sendMessage', { chat_id: chatId, text: 'مبلغ نامعتبر است. یک عدد صحیح ارسال کنید یا لغو کنید.', reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
+          }
+          const tId = s.targetUserId;
+          const tState = await getUserState(env, tId);
+          if (!tState.first_seen_at) tState.first_seen_at = Date.now();
+          const before = getBalance(tState);
+          const after = s.mode === 'inc' ? before + amount : Math.max(0, before - amount);
+          setBalance(tState, after);
+          await setUserState(env, tId, tState);
+          // Clear awaiting
+          state.awaiting_admin = undefined;
+          await setUserState(env, userId, state);
+          // Notify admin
+          await tg(env, 'sendMessage', { chat_id: chatId, text: `موجودی کاربر ${tId} از ${formatToman(before)} به ${formatToman(after)} ${s.mode === 'inc' ? 'افزایش' : 'کاهش'} یافت.` });
+          // Notify target user (directly to userId chat)
+          const note = s.mode === 'inc'
+            ? `موجودی شما ${formatToman(amount)} افزایش یافت. موجودی جدید: ${formatToman(after)}`
+            : `موجودی شما ${formatToman(amount)} کاهش یافت. موجودی جدید: ${formatToman(after)}`;
+          await tg(env, 'sendMessage', { chat_id: tId, text: note });
+          // Return to admin panel
+          const { text: pText, kb } = renderAdminMenu(env);
+          return tg(env, 'sendMessage', { chat_id: chatId, text: pText, reply_markup: kb, parse_mode: 'HTML' });
+        }
+      }
+    }
+
     // Handle awaiting UUID input for profile flow
     if (state.awaiting_uuid && typeof msg.text === 'string') {
       const text = (msg.text || '').trim();
@@ -608,12 +660,29 @@ async function handleCallback(env, cq) {
       setBalance(uState, getBalance(uState) + Number(req.amount || 0));
       await setUserState(env, req.userId, uState);
       await tg(env, 'sendMessage', { chat_id: req.chatId, text: `واریز شما تایید شد. موجودی جدید: <b>${formatToman(getBalance(uState))}</b>`, parse_mode: 'HTML' });
-      await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: `تایید شد و موجودی کاربر ${req.userId} به‌روزرسانی شد.`, reply_markup: backToMainButton() });
+      // Replace buttons on the original admin message with a single status button
+      await tg(env, 'editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [[{ text: 'وضعیت: تایید شد ✅', callback_data: `topup:status:${pendingId}:ok` }]] },
+      });
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'درخواست تایید شد.' });
     } else {
       await tg(env, 'sendMessage', { chat_id: req.chatId, text: 'متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی در ارتباط باشید یا مجدداً تلاش کنید.' });
-      await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: `درخواست ${pendingId} رد شد.`, reply_markup: backToMainButton() });
+      await tg(env, 'editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [[{ text: 'وضعیت: رد شد ❌', callback_data: `topup:status:${pendingId}:no` }]] },
+      });
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'درخواست رد شد.' });
     }
     return;
+  }
+
+  if (data.startsWith('topup:status:')) {
+    const parts = data.split(':');
+    const status = parts[3] === 'ok' ? 'تایید شده ✅' : 'رد شده ❌';
+    return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: `وضعیت: ${status}` });
   }
 
   if (data === 'profile:start') {
