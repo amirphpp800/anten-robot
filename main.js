@@ -675,13 +675,9 @@ globalThis.APP = {
     // Health check JSON and Admin Web Panel on GET
     if (request.method === 'GET') {
       const url = new URL(request.url);
-      // Admin Web Panel at /admin
+      // Admin Web Panel at /admin (public view per request)
       if (url.pathname === '/admin') {
-        const key = url.searchParams.get('key') || '';
         const requiredKey = env.ADMIN_PANEL_KEY || '';
-        if (requiredKey && key !== requiredKey) {
-          return new Response('Forbidden', { status: 403 });
-        }
         const tokenSet = !!getToken(env);
         const adminId = getAdminId(env);
         const adminSet = !!adminId;
@@ -738,7 +734,7 @@ globalThis.APP = {
       <div class="grid" style="margin-top:12px">
         <div class="tile">
           <div class="k">افزایش موجودی (تومان)</div>
-          <form method="post" action="/admin?key=${encodeURIComponent(requiredKey)}">
+          <form method="post" action="/admin">
             <input type="hidden" name="action" value="inc" />
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
@@ -749,7 +745,7 @@ globalThis.APP = {
         </div>
         <div class="tile">
           <div class="k">کاهش موجودی (تومان)</div>
-          <form method="post" action="/admin?key=${encodeURIComponent(requiredKey)}">
+          <form method="post" action="/admin">
             <input type="hidden" name="action" value="dec" />
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
@@ -786,14 +782,9 @@ globalThis.APP = {
 
     // Telegram webhook (POST)
     if (request.method === 'POST') {
-      // Admin Web Panel POST (inc/dec balance)
+      // Admin Web Panel POST (inc/dec balance) — public per request
       const url = new URL(request.url);
       if (url.pathname === '/admin') {
-        const key = url.searchParams.get('key') || '';
-        const requiredKey = env.ADMIN_PANEL_KEY || '';
-        if (requiredKey && key !== requiredKey) {
-          return new Response('Forbidden', { status: 403 });
-        }
         const form = await request.formData().catch(() => null);
         if (!form) return new Response('Bad Form', { status: 400 });
         const action = String(form.get('action') || '').trim();
@@ -816,7 +807,7 @@ globalThis.APP = {
         }
         await setUserState(env, userId, state);
         // redirect back to /admin
-        return new Response(null, { status: 303, headers: { Location: `/admin?key=${encodeURIComponent(requiredKey)}` } });
+        return new Response(null, { status: 303, headers: { Location: `/admin` } });
       }
 
       if (!getToken(env)) {
