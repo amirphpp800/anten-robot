@@ -21,10 +21,10 @@ async function tg(env, method, payload) {
 // ---------- UI: Inline Keyboards ----------
 function mainMenuMarkup(env, userId) {
   const rows = [];
-  // First row: account and topup side-by-side
+  // First row: topup (left), account (right) — Telegram orders LTR, so place Topup first
   rows.push([
-    { text: '👤 حساب کاربری', callback_data: 'menu:account' },
     { text: '💳 افزایش موجودی', callback_data: 'menu:topup' },
+    { text: '👤 حساب کاربری', callback_data: 'menu:account' },
   ]);
   // Second row: profile
   rows.push([{ text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' }]);
