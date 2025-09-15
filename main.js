@@ -52,14 +52,18 @@ function listPendingKey() {
   return 'topup:pending:list';
 }
 
+function labelForApn(value) {
+  const found = APN_OPTIONS.find((o) => o.value === value);
+  return found ? found.label : value || '-';
+}
+
 function renderAccountMenu(state, userId) {
   const bal = formatToman(getBalance(state));
   const text = `حساب کاربری شما\n\nشناسه: <code>${userId || '-'}</code>\nموجودی: <b>${bal}</b>`;
   const kb = {
     inline_keyboard: [
-      [ { text: '💳 افزایش موجودی', callback_data: 'menu:topup' } ],
-      [ { text: '📊 وضعیت', callback_data: 'menu:status' } ],
       [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' } ],
+      [ { text: '💳 افزایش موجودی', callback_data: 'menu:topup' }, { text: '📊 وضعیت', callback_data: 'menu:status' } ],
       [ { text: 'بازگشت', callback_data: 'menu:main' } ],
     ],
   };
@@ -785,13 +789,44 @@ async function handleCallback(env, cq) {
       form.append('chat_id', String(chatId));
       const blob = new Blob([xml], { type: 'application/xml' });
       form.append('document', blob, 'config.mobileconfig');
-      form.append('caption', 'پروفایل ساخته شد. آن را در iOS نصب کنید.');
+      const caption = [
+        '📄 پروفایل ساخته شد و آماده نصب است.',
+        '📘 آموزش استفاده در پیام بعدی ارسال می‌شود.',
+        '⚠️ اگر قبلاً پروفایل نصب کرده‌ای، حتماً ابتدا آن را حذف کن.',
+        '‼️ حتماً فقط یک سیم‌کارت داخل گوشی قرار بده (Dual SIM نگذار).',
+      ].join('\n');
+      form.append('caption', caption);
       await tgForm(env, 'sendDocument', form);
       // Remove previous menu/message after sending the profile
       await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
-      // Reset charge flag so each new build re-charges
+      // Send detailed how-to message
+      const howto = [
+        '🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS',
+        '',
+        '1) 📵 بدون سیم‌کارت گوشی را آماده کن.',
+        '2) ⚙️ به Settings > General > Transfer or Reset iPhone برو و گزینه Reset را انتخاب کن، سپس «Reset Network Settings» را بزن و صبر کن تمام شود.',
+        '3) 📥 وقتی گوشی روشن شد، فایل پروفایل را که ارسال شده نصب کن و یک‌بار گوشی را خاموش و روشن کن.',
+        '4) 📶 پس از روشن شدن، سیم‌کارت را بگذار، به Settings > Cellular > Cellular Data Options برو، گزینه «Voice & Data» را روی LTE بگذار و تیک VoLTE را روشن کن.',
+        '5) 🔁 سیم‌کارت را خارج کن، روی OK بزن، شبکه را روی 2G بگذار، سپس سیم‌کارت را دوباره جا بزن. آنتن باید بیاید. بعداً می‌توانی روی 3G هم قرار بدهی.',
+        '',
+        'ℹ️ تجربه: با این روش آنتن روی 3G برای چند روز پایدار بوده.',
+        '',
+        '❗️ خیلی مهم:',
+        '• اگر قبلاً پروفایل دیگری نصب داری، اول حذفش کن.',
+        '• حتماً فقط یک سیم‌کارت داخل گوشی قرار بده (از دو سیم‌کارته استفاده نکن).',
+        '',
+        '📦 نکته درباره فایل:',
+        'اگر پس از دانلود پسوند فایل درست نبود، روی فایل نگه‌دار و Rename را بزن و در انتهای نام، این پسوند را اضافه کن: .mobileconfig',
+      ].join('\n');
+      await tg(env, 'sendMessage', { chat_id: chatId, text: howto, parse_mode: 'HTML' });
+      // Update user profile counters and reset charge flag
       const st2 = await getUserState(env, userId);
-      if (st2.profile) { st2.profile._chargedOnce = false; await setUserState(env, userId, st2); }
+      st2.profiles_built_count = Number(st2.profiles_built_count || 0) + 1;
+      const byApn = st2.profiles_by_apn || {};
+      byApn[p.apn] = Number(byApn[p.apn] || 0) + 1;
+      st2.profiles_by_apn = byApn;
+      if (st2.profile) { st2.profile._chargedOnce = false; }
+      await setUserState(env, userId, st2);
       // increment profiles stat
       const prow = await env.BOT_KV.get('stats:profiles');
       const pn = prow ? Number(prow) || 0 : 0;
@@ -848,12 +883,19 @@ async function handleCallback(env, cq) {
   }
 
   if (data === 'menu:status') {
-    // Example: render simple status from KV
+    // Render account status with profile counts
     let statusLine = 'شناسه کاربری شما ثبت شد.';
     if (userId) {
       const state = await getUserState(env, userId);
       const since = state.first_seen_at ? new Date(state.first_seen_at).toLocaleString('fa-IR') : 'نامشخص';
-      statusLine = `شناسه: <code>${userId}</code>\nاولین ورود: <b>${since}</b>`;
+      const totalProfiles = Number(state.profiles_built_count || 0);
+      const byApn = state.profiles_by_apn || {};
+      let apnLines = '';
+      const apnKeys = Object.keys(byApn);
+      if (apnKeys.length) {
+        apnLines = '\n' + apnKeys.map(k => `- ${labelForApn(k)}: <b>${byApn[k]}</b>`).join('\n');
+      }
+      statusLine = `شناسه: <code>${userId}</code>\nاولین ورود: <b>${since}</b>\nتعداد پروفایل‌های دریافت‌شده: <b>${totalProfiles}</b>${apnLines}`;
     }
     return tg(env, 'editMessageText', {
       chat_id: chatId,
