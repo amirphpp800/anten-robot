@@ -59,6 +59,7 @@ function renderAccountMenu(state, userId) {
     inline_keyboard: [
       [ { text: '💳 افزایش موجودی', callback_data: 'menu:topup' } ],
       [ { text: '📊 وضعیت', callback_data: 'menu:status' } ],
+      [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' } ],
       [ { text: 'بازگشت', callback_data: 'menu:main' } ],
     ],
   };
@@ -236,7 +237,7 @@ function renderProfileMenu(state) {
   const p = state.profile || {};
   const apn = p.apn || 'انتخاب نشده';
   const uuid = p.rootUUID || 'انتخاب نشده';
-  const text = `تنظیم پروفایل iOS\n\nاپراتور (APN): ${apn}\nUUID ریشه: ${uuid}\n\nاگر اطلاعات کامل است، ساخت پروفایل را بزنید.`;
+  const text = `تنظیم پروفایل iOS\n\nاپراتور (APN): ${apn}\nUUID: ${uuid}\n\nاگر اطلاعات کامل است، ساخت پروفایل را بزنید.`;
   const kb = {
     inline_keyboard: [
       [ { text: 'تغییر اپراتور', callback_data: 'profile:apn' } ],
@@ -732,14 +733,9 @@ async function handleCallback(env, cq) {
   if (data === 'profile:uuid:ask') {
     if (userId) {
       const state = await getUserState(env, userId);
-      state.awaiting_uuid = true;
+      state.awaiting_uuid = false;
       await setUserState(env, userId, state);
-      return tg(env, 'editMessageText', {
-        chat_id: chatId,
-        message_id: messageId,
-        text: 'لطفاً یک UUID نسخه ۴ معتبر ارسال کنید. برای لغو، از دکمه زیر استفاده کنید.',
-        reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'profile:menu' }]] },
-      });
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'این بخش غیرفعال است و در حال توسعه می‌باشد.', show_alert: true });
     }
   }
 
@@ -769,10 +765,14 @@ async function handleCallback(env, cq) {
       if (!p._chargedOnce) {
         const bal = getBalance(state);
         if (bal < COST_PER_PROFILE) {
-          await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'موجودی کافی نیست.', show_alert: true });
-          const { text, kb } = renderAccountMenu(state, userId);
-          await tg(env, 'sendMessage', { chat_id: chatId, text: 'برای ساخت پروفایل نیاز به افزایش موجودی دارید.', reply_markup: backToMainButton() });
-          return tg(env, 'sendMessage', { chat_id: chatId, text, reply_markup: kb, parse_mode: 'HTML' });
+          const insufficient = `موجودی شما برای ساخت پروفایل کافی نیست.\nهزینه هر پروفایل: <b>${formatToman(COST_PER_PROFILE)}</b>\nموجودی فعلی: <b>${formatToman(bal)}</b>`;
+          return tg(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: messageId,
+            text: insufficient,
+            reply_markup: { inline_keyboard: [[{ text: '💳 افزایش موجودی', callback_data: 'menu:topup' }], [{ text: 'بازگشت', callback_data: 'menu:main' }]] },
+            parse_mode: 'HTML',
+          });
         }
         setBalance(state, bal - COST_PER_PROFILE);
         p._chargedOnce = true; // mark charged for current cycle
@@ -787,6 +787,8 @@ async function handleCallback(env, cq) {
       form.append('document', blob, 'config.mobileconfig');
       form.append('caption', 'پروفایل ساخته شد. آن را در iOS نصب کنید.');
       await tgForm(env, 'sendDocument', form);
+      // Remove previous menu/message after sending the profile
+      await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
       // Reset charge flag so each new build re-charges
       const st2 = await getUserState(env, userId);
       if (st2.profile) { st2.profile._chargedOnce = false; await setUserState(env, userId, st2); }
