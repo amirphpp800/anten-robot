@@ -3,6 +3,7 @@
 
 const getToken = (env) => env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
 const apiBase = (env) => `https://api.telegram.org/bot${getToken(env)}/`;
+const getAdminId = (env) => Number(env.ADMIN_TELEGRAM_ID || 0) || 0;
 
 async function tg(env, method, payload) {
   const res = await fetch(apiBase(env) + method, {
@@ -22,17 +23,17 @@ function mainMenuMarkup() {
   return {
     inline_keyboard: [
       [
-        { text: 'خرید / ارتقا اکانت', callback_data: 'action:buy' },
+        { text: '👤 حساب کاربری | 💳 افزایش موجودی', callback_data: 'menu:account' },
       ],
       [
-        { text: 'دریافت پروفایل', callback_data: 'profile:start' },
+        { text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' },
       ],
       [
-        { text: 'وضعیت اکانت', callback_data: 'menu:status' },
-        { text: 'تنظیمات', callback_data: 'menu:settings' },
+        { text: '🛠️ پنل ادمین', callback_data: 'admin:panel' },
+        { text: '⚙️ تنظیمات', callback_data: 'menu:settings' },
       ],
       [
-        { text: 'راهنما', callback_data: 'menu:help' },
+        { text: '📚 راهنما', callback_data: 'menu:help' },
       ],
     ],
   };
@@ -64,6 +65,15 @@ const APN_OPTIONS = [
   { value: 'samantel', label: 'samantel' },
   { value: 'shatelmobile', label: 'SHATEL' },
 ];
+
+// Billing and Admin
+const COST_PER_PROFILE = 250000; // toman
+const TOPUP_PLANS = [
+  { amount: 250000, label: 'افزایش موجودی ۲۵۰,۰۰۰ تومان' },
+  { amount: 500000, label: 'افزایش موجودی ۵۰۰,۰۰۰ تومان' },
+];
+const CARD_NUMBER = '6219 8619 4308 4037';
+const CARD_OWNER_NAME = (env) => env.CARD_OWNER_NAME || 'نام صاحب کارت';
 
 const DEFAULT_EXCLUSIONS_BASE = ['localhost', '127.0.0.1'];
 const DEFAULT_FALLBACK_CIDR = '169.254.0.0/16';
@@ -383,6 +393,35 @@ async function handleMessage(env, msg) {
       await setUserState(env, userId, state);
     }
   }
+  // If user is asked to send a UUID or receipt upload
+  if (userId) {
+    const state2 = await getUserState(env, userId);
+    // Awaiting receipt upload
+    if (state2.awaiting_receipt && (msg.photo || msg.document)) {
+      const amount = Number(state2.awaiting_receipt_amount || 0);
+      const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
+      const pendingId = genId();
+      const payload = { id: pendingId, userId, chatId, amount, fileId, at: Date.now() };
+      await env.BOT_KV.put(pendingTopupKey(pendingId), JSON.stringify(payload));
+      const listRaw = await env.BOT_KV.get(listPendingKey());
+      const list = listRaw ? JSON.parse(listRaw) : [];
+      list.push(pendingId);
+      await env.BOT_KV.put(listPendingKey(), JSON.stringify(list));
+      state2.awaiting_receipt = false;
+      state2.awaiting_receipt_amount = 0;
+      await setUserState(env, userId, state2);
+      await tg(env, 'sendMessage', { chat_id: chatId, text: 'رسید شما دریافت شد. پس از بررسی به شما اطلاع داده می‌شود.' });
+      const adminId = getAdminId(env);
+      if (adminId) {
+        if (msg.photo) {
+          await tg(env, 'sendPhoto', { chat_id: adminId, photo: fileId, caption: `درخواست افزایش موجودی\nکاربر: <code>${userId}</code>\nمبلغ: ${formatToman(amount)}\nشناسه: <code>${pendingId}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'تایید ✅', callback_data: `topup:approve:${pendingId}` }, { text: 'رد ❌', callback_data: `topup:reject:${pendingId}` }]] } });
+        } else if (msg.document) {
+          await tg(env, 'sendDocument', { chat_id: adminId, document: fileId, caption: `درخواست افزایش موجودی\nکاربر: <code>${userId}</code>\nمبلغ: ${formatToman(amount)}\nشناسه: <code>${pendingId}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'تایید ✅', callback_data: `topup:approve:${pendingId}` }, { text: 'رد ❌', callback_data: `topup:reject:${pendingId}` }]] } });
+        }
+      }
+      return;
+    }
+  }
   // Ignore text content; always present main menu
 
   await tg(env, 'sendMessage', {
@@ -412,7 +451,66 @@ async function handleCallback(env, cq) {
 
   // Route by callback_data
   // ---- Profile Flow ----
+  // ---- Account & Top-up ----
+  if (data === 'menu:account') {
+    if (userId) {
+      const state = await getUserState(env, userId);
+      const { text, kb } = renderAccountMenu(state, userId);
+      return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+    }
+  }
+
+  if (data.startsWith('topup:choose:')) {
+    const amount = Number(data.split(':').pop());
+    const { text, kb } = renderTopupInstruction(amount, env);
+    return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+  }
+
+  if (data.startsWith('topup:await:')) {
+    const amount = Number(data.split(':').pop());
+    if (userId) {
+      const state = await getUserState(env, userId);
+      state.awaiting_receipt = true;
+      state.awaiting_receipt_amount = amount;
+      await setUserState(env, userId, state);
+      return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: 'رسید پرداخت را به صورت تصویر یا فایل ارسال کنید.', reply_markup: { inline_keyboard: [[{ text: 'بازگشت', callback_data: 'menu:account' }]] } });
+    }
+  }
+
+  if (data.startsWith('topup:approve:') || data.startsWith('topup:reject:')) {
+    const isApprove = data.startsWith('topup:approve:');
+    const pendingId = data.split(':').pop();
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'مجوز ادمین ندارید.', show_alert: true });
+    }
+    const raw = await env.BOT_KV.get(pendingTopupKey(pendingId));
+    if (!raw) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'درخواست یافت نشد یا پردازش شده.', show_alert: true });
+    }
+    const req = JSON.parse(raw);
+    // Remove from list
+    const listRaw = await env.BOT_KV.get(listPendingKey());
+    const list = listRaw ? JSON.parse(listRaw) : [];
+    await env.BOT_KV.put(listPendingKey(), JSON.stringify(list.filter((x) => x !== pendingId)));
+    await env.BOT_KV.delete(pendingTopupKey(pendingId));
+    if (isApprove) {
+      // credit user
+      const uState = await getUserState(env, req.userId);
+      setBalance(uState, getBalance(uState) + Number(req.amount || 0));
+      await setUserState(env, req.userId, uState);
+      await tg(env, 'sendMessage', { chat_id: req.chatId, text: `واریز شما تایید شد. موجودی جدید: <b>${formatToman(getBalance(uState))}</b>`, parse_mode: 'HTML' });
+      await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: `تایید شد و موجودی کاربر ${req.userId} به‌روزرسانی شد.`, reply_markup: backToMainButton() });
+    } else {
+      await tg(env, 'sendMessage', { chat_id: req.chatId, text: 'متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی در ارتباط باشید یا مجدداً تلاش کنید.' });
+      await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: `درخواست ${pendingId} رد شد.`, reply_markup: backToMainButton() });
+    }
+    return;
+  }
+
   if (data === 'profile:start') {
+    // Gate by balance: charge on build, but inform cost here
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: `هزینه هر پروفایل: ${formatToman(COST_PER_PROFILE)}` });
     return tg(env, 'editMessageText', {
       chat_id: chatId,
       message_id: messageId,
@@ -522,6 +620,21 @@ async function handleCallback(env, cq) {
       if (!p.rootUUID || !UUID_V4_REGEX.test(p.rootUUID)) {
         return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'UUID معتبر تنظیم نشده است.', show_alert: true });
       }
+      // Charge if not already charged for this build
+      if (!p._chargedOnce) {
+        const bal = getBalance(state);
+        if (bal < COST_PER_PROFILE) {
+          await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'موجودی کافی نیست.', show_alert: true });
+          const { text, kb } = renderAccountMenu(state, userId);
+          await tg(env, 'sendMessage', { chat_id: chatId, text: 'برای ساخت پروفایل نیاز به افزایش موجودی دارید.', reply_markup: backToMainButton() });
+          return tg(env, 'sendMessage', { chat_id: chatId, text, reply_markup: kb, parse_mode: 'HTML' });
+        }
+        setBalance(state, bal - COST_PER_PROFILE);
+        p._chargedOnce = true; // mark charged for current cycle
+        state.profile = p;
+        await setUserState(env, userId, state);
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `هزینه ${formatToman(COST_PER_PROFILE)} از موجودی شما کسر شد. موجودی فعلی: <b>${formatToman(getBalance(state))}</b>`, parse_mode: 'HTML' });
+      }
       const xml = buildMobileconfig({ rootUUID: p.rootUUID, apn: p.apn, selectedCidr: p.godMode ? (p.selectedCidr || DEFAULT_FALLBACK_CIDR) : DEFAULT_FALLBACK_CIDR });
       const form = new FormData();
       form.append('chat_id', String(chatId));
@@ -529,6 +642,9 @@ async function handleCallback(env, cq) {
       form.append('document', blob, 'config.mobileconfig');
       form.append('caption', 'پروفایل ساخته شد. آن را در iOS نصب کنید.');
       await tgForm(env, 'sendDocument', form);
+      // Reset charge flag so each new build re-charges
+      const st2 = await getUserState(env, userId);
+      if (st2.profile) { st2.profile._chargedOnce = false; await setUserState(env, userId, st2); }
       return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'فایل ارسال شد.' });
     }
   }
