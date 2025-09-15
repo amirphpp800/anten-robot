@@ -19,24 +19,16 @@ async function tg(env, method, payload) {
 }
 
 // ---------- UI: Inline Keyboards ----------
-function mainMenuMarkup() {
-  return {
-    inline_keyboard: [
-      [
-        { text: '👤 حساب کاربری | 💳 افزایش موجودی', callback_data: 'menu:account' },
-      ],
-      [
-        { text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' },
-      ],
-      [
-        { text: '🛠️ پنل ادمین', callback_data: 'admin:panel' },
-        { text: '⚙️ تنظیمات', callback_data: 'menu:settings' },
-      ],
-      [
-        { text: '📚 راهنما', callback_data: 'menu:help' },
-      ],
-    ],
-  };
+function mainMenuMarkup(env, userId) {
+  const rows = [];
+  rows.push([{ text: '👤 حساب کاربری', callback_data: 'menu:account' }]);
+  rows.push([{ text: '💳 افزایش موجودی', callback_data: 'menu:topup' }]);
+  rows.push([{ text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' }]);
+  // Show admin only to admin user
+  if (userId && getAdminId(env) && getAdminId(env) === userId) {
+    rows.push([{ text: '🛠️ پنل ادمین', callback_data: 'admin:panel' }]);
+  }
+  return { inline_keyboard: rows };
 }
 
 function backToMainButton() {
@@ -58,11 +50,10 @@ const TEXTS = {
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const APN_OPTIONS = [
-  { value: 'mcinet', label: 'MCI' },
-  { value: 'mtnirancell', label: 'Irancell' },
-  { value: 'RighTel', label: 'RighTel' },
-  { value: 'ApTel', label: 'ApTel' },
-  { value: 'samantel', label: 'samantel' },
+  { value: 'mcinet', label: 'MCI 🔵' },
+  { value: 'mtnirancell', label: 'Irancell 🟡' },
+  { value: 'RighTel', label: 'RighTel 🟣' },
+  { value: 'ApTel', label: 'Aptel 🔴' },
   { value: 'shatelmobile', label: 'SHATEL' },
 ];
 
@@ -73,25 +64,10 @@ const TOPUP_PLANS = [
   { amount: 500000, label: 'افزایش موجودی ۵۰۰,۰۰۰ تومان' },
 ];
 const CARD_NUMBER = '6219 8619 4308 4037';
-const CARD_OWNER_NAME = (env) => env.CARD_OWNER_NAME || 'نام صاحب کارت';
+const CARD_OWNER_NAME = (env) => env.CARD_OWNER_NAME || 'امیرحسین سیاهبالائی';
 
 const DEFAULT_EXCLUSIONS_BASE = ['localhost', '127.0.0.1'];
 const DEFAULT_FALLBACK_CIDR = '169.254.0.0/16';
-const DEFAULT_GOD_CIDRS = [
-  '10.0.0.0/8',
-  '172.16.0.0/12',
-  '192.168.0.0/16',
-  '2.176.0.0/15',
-  '2.190.0.0/15',
-  '151.232.128.0/17',
-  '5.208.0.0/16',
-  '164.215.128.0/17',
-  '46.143.0.0/17',
-  '79.127.0.0/17',
-  '46.209.128.0/18',
-  '46.209.224.0/19',
-  '46.209.64.0/19',
-];
 
 function generateUUIDv4() {
   // Cloudflare Workers supports crypto.getRandomValues
@@ -127,24 +103,17 @@ function renderApnKeyboard() {
   return { inline_keyboard: rows };
 }
 
-function renderCidrKeyboard() {
-  const rows = DEFAULT_GOD_CIDRS.map((c) => [{ text: c, callback_data: `profile:cidr:set:${c}` }]);
-  rows.push([{ text: 'بازگشت', callback_data: 'profile:menu' }]);
-  return { inline_keyboard: rows };
-}
+// (Removed God Mode & CIDR selection for simpler UX)
 
 function renderProfileMenu(state) {
   const p = state.profile || {};
   const apn = p.apn || 'انتخاب نشده';
   const uuid = p.rootUUID || 'انتخاب نشده';
-  const god = p.godMode ? 'فعال' : 'غیرفعال';
-  const cidr = p.selectedCidr || DEFAULT_FALLBACK_CIDR;
-  const text = `تنظیم پروفایل iOS\n\nاپراتور (APN): ${apn}\nUUID ریشه: ${uuid}\nGod Mode: ${god}\nCIDR: ${cidr}\n\nمراحل را تکمیل و سپس ساخت پروفایل را بزنید.`;
+  const text = `تنظیم پروفایل iOS\n\nاپراتور (APN): ${apn}\nUUID ریشه: ${uuid}\n\nاگر اطلاعات کامل است، ساخت پروفایل را بزنید.`;
   const kb = {
     inline_keyboard: [
-      [ { text: 'انتخاب اپراتور', callback_data: 'profile:apn' } ],
-      [ { text: 'ساخت UUID', callback_data: 'profile:uuid:auto' }, { text: 'ثبت UUID دستی', callback_data: 'profile:uuid:ask' } ],
-      [ { text: `God Mode: ${p.godMode ? 'خاموش' : 'روشن'}`, callback_data: 'profile:god:toggle' }, { text: 'انتخاب CIDR', callback_data: 'profile:cidr' } ],
+      [ { text: 'تغییر اپراتور', callback_data: 'profile:apn' } ],
+      [ { text: 'ساخت UUID جدید', callback_data: 'profile:uuid:auto' }, { text: 'ثبت UUID دستی', callback_data: 'profile:uuid:ask' } ],
       [ { text: 'ساخت و ارسال پروفایل', callback_data: 'profile:build' } ],
       [ { text: 'بازگشت به منو', callback_data: 'menu:main' } ],
     ],
@@ -152,10 +121,10 @@ function renderProfileMenu(state) {
   return { text, kb };
 }
 
-function buildMobileconfig({ rootUUID, apn, selectedCidr }) {
+function buildMobileconfig({ rootUUID, apn }) {
   const exclusionListValues = [
     ...DEFAULT_EXCLUSIONS_BASE,
-    selectedCidr && selectedCidr.includes('/') ? selectedCidr : DEFAULT_FALLBACK_CIDR,
+    DEFAULT_FALLBACK_CIDR,
   ];
   const gen = () => generateUUIDv4();
   const xml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -301,7 +270,9 @@ function buildMobileconfig({ rootUUID, apn, selectedCidr }) {
             <string></string>
             <key>ExclusionList</key>
             <array>
-${exclusionListValues.map((v) => `                <string>${v}</string>`).join('\n')}
+                <string>localhost</string>
+                <string>127.0.0.1</string>
+                <string>169.254.0.0/16</string>
             </array>
         </dict>
 
@@ -390,6 +361,13 @@ async function handleMessage(env, msg) {
 
     if (!state.first_seen_at) {
       state.first_seen_at = Date.now();
+      // increment users stat only once per user
+      if (!state._counted_user) {
+        const raw = await env.BOT_KV.get('stats:users');
+        const n = raw ? Number(raw) || 0 : 0;
+        await env.BOT_KV.put('stats:users', String(n + 1));
+        state._counted_user = true;
+      }
       await setUserState(env, userId, state);
     }
   }
@@ -427,7 +405,7 @@ async function handleMessage(env, msg) {
   await tg(env, 'sendMessage', {
     chat_id: chatId,
     text: TEXTS.welcome + '\n\n' + TEXTS.main,
-    reply_markup: mainMenuMarkup(),
+    reply_markup: mainMenuMarkup(env, userId),
     parse_mode: 'HTML',
   });
 }
@@ -456,6 +434,14 @@ async function handleCallback(env, cq) {
     if (userId) {
       const state = await getUserState(env, userId);
       const { text, kb } = renderAccountMenu(state, userId);
+      return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+    }
+  }
+
+  if (data === 'menu:topup') {
+    if (userId) {
+      const state = await getUserState(env, userId);
+      const { text, kb } = renderTopupMenu(env, state, userId);
       return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
     }
   }
@@ -534,8 +520,6 @@ async function handleCallback(env, cq) {
       const state = await getUserState(env, userId);
       state.profile = state.profile || {};
       state.profile.apn = apn;
-      if (!state.profile.selectedCidr) state.profile.selectedCidr = DEFAULT_FALLBACK_CIDR;
-      if (typeof state.profile.godMode !== 'boolean') state.profile.godMode = false;
       await setUserState(env, userId, state);
       const { text: pText, kb } = renderProfileMenu(state);
       return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: pText, reply_markup: kb });
@@ -578,37 +562,7 @@ async function handleCallback(env, cq) {
     }
   }
 
-  if (data === 'profile:god:toggle') {
-    if (userId) {
-      const state = await getUserState(env, userId);
-      state.profile = state.profile || {};
-      state.profile.godMode = !state.profile.godMode;
-      await setUserState(env, userId, state);
-      const { text: pText, kb } = renderProfileMenu(state);
-      return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: pText, reply_markup: kb });
-    }
-  }
-
-  if (data === 'profile:cidr') {
-    return tg(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text: 'یک CIDR انتخاب کنید:',
-      reply_markup: renderCidrKeyboard(),
-    });
-  }
-
-  if (data.startsWith('profile:cidr:set:')) {
-    const cidr = data.replace('profile:cidr:set:', '');
-    if (userId) {
-      const state = await getUserState(env, userId);
-      state.profile = state.profile || {};
-      state.profile.selectedCidr = cidr;
-      await setUserState(env, userId, state);
-      const { text: pText, kb } = renderProfileMenu(state);
-      return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text: pText, reply_markup: kb });
-    }
-  }
+  // (Removed God Mode toggle and CIDR selection routes)
 
   if (data === 'profile:build') {
     if (userId) {
@@ -635,7 +589,7 @@ async function handleCallback(env, cq) {
         await setUserState(env, userId, state);
         await tg(env, 'sendMessage', { chat_id: chatId, text: `هزینه ${formatToman(COST_PER_PROFILE)} از موجودی شما کسر شد. موجودی فعلی: <b>${formatToman(getBalance(state))}</b>`, parse_mode: 'HTML' });
       }
-      const xml = buildMobileconfig({ rootUUID: p.rootUUID, apn: p.apn, selectedCidr: p.godMode ? (p.selectedCidr || DEFAULT_FALLBACK_CIDR) : DEFAULT_FALLBACK_CIDR });
+      const xml = buildMobileconfig({ rootUUID: p.rootUUID, apn: p.apn });
       const form = new FormData();
       form.append('chat_id', String(chatId));
       const blob = new Blob([xml], { type: 'application/xml' });
@@ -645,6 +599,10 @@ async function handleCallback(env, cq) {
       // Reset charge flag so each new build re-charges
       const st2 = await getUserState(env, userId);
       if (st2.profile) { st2.profile._chargedOnce = false; await setUserState(env, userId, st2); }
+      // increment profiles stat
+      const prow = await env.BOT_KV.get('stats:profiles');
+      const pn = prow ? Number(prow) || 0 : 0;
+      await env.BOT_KV.put('stats:profiles', String(pn + 1));
       return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'فایل ارسال شد.' });
     }
   }
@@ -654,7 +612,7 @@ async function handleCallback(env, cq) {
       chat_id: chatId,
       message_id: messageId,
       text: TEXTS.main,
-      reply_markup: mainMenuMarkup(),
+      reply_markup: mainMenuMarkup(env, userId),
       parse_mode: 'HTML',
     });
   }
@@ -794,9 +752,79 @@ async function handleUpdate(env, update) {
 globalThis.APP = {
   // request: Request, env: Env, ctx: { waitUntil(fn) }
   async fetch(request, env, ctx) {
-    // Health check or simple info on GET
+    // Health check JSON and Admin Web Panel on GET
     if (request.method === 'GET') {
       const url = new URL(request.url);
+      // Admin Web Panel at /admin
+      if (url.pathname === '/admin') {
+        const key = url.searchParams.get('key') || '';
+        const requiredKey = env.ADMIN_PANEL_KEY || '';
+        if (requiredKey && key !== requiredKey) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        const tokenSet = !!getToken(env);
+        const adminId = getAdminId(env);
+        const adminSet = !!adminId;
+        const kvConnected = !!env.BOT_KV;
+        const serviceActive = true; // worker is running
+        let usersCount = 0, profilesCount = 0;
+        try {
+          const u = kvConnected ? await env.BOT_KV.get('stats:users') : null;
+          const p = kvConnected ? await env.BOT_KV.get('stats:profiles') : null;
+          usersCount = u ? Number(u) || 0 : 0;
+          profilesCount = p ? Number(p) || 0 : 0;
+        } catch {}
+
+        const html = `<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>پنل ادمین ربات</title>
+  <style>
+    :root{--bg:#0b0f14;--glass:rgba(255,255,255,0.06);--stroke:rgba(255,255,255,0.12);--text:#e6f0ff;--muted:#9fb3c8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;background:radial-gradient(1200px 800px at 10% -10%, #122033 0%, transparent 60%), radial-gradient(1000px 600px at 110% 10%, #1a2a3f 0%, transparent 60%), var(--bg);font-family:IRANSans,Segoe UI,Roboto,system-ui,Arial}
+    .wrap{display:flex;align-items:center;justify-content:center;padding:48px}
+    .card{width:100%;max-width:960px;padding:24px 24px 8px;border:1px solid var(--stroke);background:var(--glass);backdrop-filter:blur(16px) saturate(120%);border-radius:18px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{margin:0 0 16px;color:var(--text);font-size:22px;display:flex;gap:8px;align-items:center}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+    .tile{padding:14px 16px;border:1px solid var(--stroke);border-radius:14px;background:rgba(255,255,255,0.04)}
+    .k{color:var(--muted);font-size:12px;margin-bottom:6px}
+    .v{color:var(--text);font-weight:600}
+    .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:var(--text)}
+    footer{margin-top:14px;color:var(--muted);font-size:12px}
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600&display=swap" rel="stylesheet">
+  <style>body{font-family:"Vazirmatn",system-ui}</style>
+  </head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>🧰 پنل ادمین ربات</h1>
+      <div class="grid">
+        <div class="tile"><div class="k">توکن ربات</div><div class="v ${tokenSet?'ok':'bad'}">${tokenSet?'تنظیم شده':'تنظیم نشده'}</div></div>
+        <div class="tile"><div class="k">ADMIN_TELEGRAM_ID</div><div class="v ${adminSet?'ok':'bad'}">${adminSet?adminId:'تعریف نشده'}</div></div>
+        <div class="tile"><div class="k">اتصال KV</div><div class="v ${kvConnected?'ok':'bad'}">${kvConnected?'متصل':'نامتصل'}</div></div>
+        <div class="tile"><div class="k">وضعیت سرویس</div><div class="v ${serviceActive?'ok':'bad'}">${serviceActive?'فعال':'غیرفعال'}</div></div>
+        <div class="tile"><div class="k">تعداد کاربران</div><div class="v">${usersCount}</div></div>
+        <div class="tile"><div class="k">تعداد پروفایل‌های ساخته‌شده</div><div class="v">${profilesCount}</div></div>
+        <div class="tile"><div class="k">کارت جهت واریز</div><div class="v"><code>${CARD_NUMBER}</code></div></div>
+        <div class="tile"><div class="k">نام صاحب کارت</div><div class="v">${CARD_OWNER_NAME(env)}</div></div>
+      </div>
+      <footer>آخرین بروزرسانی: <code>${new Date().toLocaleString('fa-IR')}</code></footer>
+    </div>
+  </div>
+</body>
+</html>`;
+
+        return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      }
+
+      // Default: JSON health info
       const info = {
         ok: true,
         name: 'Telegram Inline Keyboard Bot',
@@ -804,6 +832,7 @@ globalThis.APP = {
         path: url.pathname,
         kvBinding: !!env.BOT_KV,
         botToken: getToken(env) ? 'set' : 'missing',
+        adminId: getAdminId(env) || null,
       };
       return new Response(JSON.stringify(info, null, 2), {
         status: 200,
