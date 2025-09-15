@@ -21,8 +21,12 @@ async function tg(env, method, payload) {
 // ---------- UI: Inline Keyboards ----------
 function mainMenuMarkup(env, userId) {
   const rows = [];
-  rows.push([{ text: '👤 حساب کاربری', callback_data: 'menu:account' }]);
-  rows.push([{ text: '💳 افزایش موجودی', callback_data: 'menu:topup' }]);
+  // First row: account and topup side-by-side
+  rows.push([
+    { text: '👤 حساب کاربری', callback_data: 'menu:account' },
+    { text: '💳 افزایش موجودی', callback_data: 'menu:topup' },
+  ]);
+  // Second row: profile
   rows.push([{ text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' }]);
   // Show admin only to admin user
   if (userId && getAdminId(env) && getAdminId(env) === userId) {
@@ -39,10 +43,7 @@ function backToMainButton() {
 const TEXTS = {
   welcome: 'سلام! لطفاً از دکمه‌های زیر استفاده کنید. پیام تایپی پذیرفته نمی‌شود.',
   main: 'به منوی اصلی خوش آمدید. یکی از گزینه‌ها را انتخاب کنید:',
-  help: 'راهنما:\n- فقط با دکمه‌ها کار کنید.\n- اگر سؤالی دارید از بخش پشتیبانی/راهنما استفاده کنید.',
   status: 'وضعیت اکانت شما:',
-  settings: 'تنظیمات ربات:',
-  buy: 'برای خرید/ارتقا اکانت از گزینه‌های زیر استفاده کنید.',
   textOnlyButtons: 'این ربات فقط با دکمه‌های شیشه‌ای کار می‌کند. لطفاً از دکمه‌های زیر استفاده کنید.',
 };
 
@@ -644,93 +645,12 @@ async function handleCallback(env, cq) {
     });
   }
 
-  if (data === 'menu:settings') {
-    // You can expand with more setting buttons
-    return tg(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text: TEXTS.settings,
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: 'اعلان‌ها: روشن/خاموش', callback_data: 'action:toggle:notify' }],
-          [{ text: 'زبان: فارسی', callback_data: 'action:set:lang:fa' }],
-          [{ text: 'بازگشت', callback_data: 'menu:main' }],
-        ],
-      },
-      parse_mode: 'HTML',
-    });
-  }
-
-  // Example actions (stub)
-  if (data === 'action:buy') {
-    return tg(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text: TEXTS.buy,
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: 'پلن پایه', callback_data: 'action:plan:basic' }],
-          [{ text: 'پلن حرفه‌ای', callback_data: 'action:plan:pro' }],
-          [{ text: 'بازگشت', callback_data: 'menu:main' }],
-        ],
-      },
-      parse_mode: 'HTML',
-    });
-  }
-
-  if (data.startsWith('action:plan:')) {
-    const plan = data.split(':').pop();
-    // Implement your payment/link logic here
-    return tg(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text: `پلن انتخابی: <b>${plan}</b>\nبرای ادامه، لطفاً دستورالعمل پرداخت/لینک را دنبال کنید.`,
-      reply_markup: backToMainButton(),
-      parse_mode: 'HTML',
-    });
-  }
-
-  if (data === 'action:toggle:notify') {
-    if (userId) {
-      const state = await getUserState(env, userId);
-      state.notify = !state.notify;
-      await setUserState(env, userId, state);
-      return tg(env, 'editMessageText', {
-        chat_id: chatId,
-        message_id: messageId,
-        text: `اعلان‌ها: ${state.notify ? 'روشن' : 'خاموش'}`,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: 'بازگشت', callback_data: 'menu:main' }],
-          ],
-        },
-        parse_mode: 'HTML',
-      });
-    }
-  }
-
-  if (data.startsWith('action:set:lang:')) {
-    const lang = data.split(':').pop();
-    if (userId) {
-      const state = await getUserState(env, userId);
-      state.lang = lang;
-      await setUserState(env, userId, state);
-    }
-    return tg(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text: `زبان تنظیم شد: <b>${lang}</b>`,
-      reply_markup: backToMainButton(),
-      parse_mode: 'HTML',
-    });
-  }
-
   // Fallback: go back to main
   return tg(env, 'editMessageText', {
     chat_id: chatId,
     message_id: messageId,
     text: TEXTS.main,
-    reply_markup: mainMenuMarkup(),
+    reply_markup: mainMenuMarkup(env, userId),
     parse_mode: 'HTML',
   });
 }
@@ -815,6 +735,30 @@ globalThis.APP = {
         <div class="tile"><div class="k">کارت جهت واریز</div><div class="v"><code>${CARD_NUMBER}</code></div></div>
         <div class="tile"><div class="k">نام صاحب کارت</div><div class="v">${CARD_OWNER_NAME(env)}</div></div>
       </div>
+      <div class="grid" style="margin-top:12px">
+        <div class="tile">
+          <div class="k">افزایش موجودی (تومان)</div>
+          <form method="post" action="/admin?key=${encodeURIComponent(requiredKey)}">
+            <input type="hidden" name="action" value="inc" />
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
+              <input name="amount" type="number" placeholder="مبلغ تومان" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
+              <button type="submit" style="padding:8px 12px;border-radius:8px;border:1px solid var(--stroke);background:rgba(52,211,153,0.15);color:var(--ok);cursor:pointer">افزایش</button>
+            </div>
+          </form>
+        </div>
+        <div class="tile">
+          <div class="k">کاهش موجودی (تومان)</div>
+          <form method="post" action="/admin?key=${encodeURIComponent(requiredKey)}">
+            <input type="hidden" name="action" value="dec" />
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
+              <input name="amount" type="number" placeholder="مبلغ تومان" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
+              <button type="submit" style="padding:8px 12px;border-radius:8px;border:1px solid var(--stroke);background:rgba(248,113,113,0.15);color:var(--bad);cursor:pointer">کاهش</button>
+            </div>
+          </form>
+        </div>
+      </div>
       <footer>آخرین بروزرسانی: <code>${new Date().toLocaleString('fa-IR')}</code></footer>
     </div>
   </div>
@@ -842,6 +786,39 @@ globalThis.APP = {
 
     // Telegram webhook (POST)
     if (request.method === 'POST') {
+      // Admin Web Panel POST (inc/dec balance)
+      const url = new URL(request.url);
+      if (url.pathname === '/admin') {
+        const key = url.searchParams.get('key') || '';
+        const requiredKey = env.ADMIN_PANEL_KEY || '';
+        if (requiredKey && key !== requiredKey) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        const form = await request.formData().catch(() => null);
+        if (!form) return new Response('Bad Form', { status: 400 });
+        const action = String(form.get('action') || '').trim();
+        const userIdStr = String(form.get('userId') || '').trim();
+        const amountStr = String(form.get('amount') || '').trim();
+        const userId = Number(userIdStr);
+        const amount = Math.max(0, Math.floor(Number(amountStr) || 0));
+        if (!userId || !amount) {
+          return new Response('Invalid input', { status: 400 });
+        }
+        let state = await getUserState(env, userId);
+        if (!state.first_seen_at) state.first_seen_at = Date.now();
+        const bal = Number(state.balance || 0);
+        if (action === 'inc') {
+          state.balance = bal + amount;
+        } else if (action === 'dec') {
+          state.balance = Math.max(0, bal - amount);
+        } else {
+          return new Response('Unknown action', { status: 400 });
+        }
+        await setUserState(env, userId, state);
+        // redirect back to /admin
+        return new Response(null, { status: 303, headers: { Location: `/admin?key=${encodeURIComponent(requiredKey)}` } });
+      }
+
       if (!getToken(env)) {
         return new Response('Missing TELEGRAM_BOT_TOKEN', { status: 500 });
       }
