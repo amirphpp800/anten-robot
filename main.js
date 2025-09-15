@@ -90,9 +90,22 @@ function renderTopupInstruction(amount, env) {
 }
 
 // ---------- Admin Renderers ----------
-function renderAdminMenu(env) {
+function profilesDisabledKey() { return 'config:profiles_disabled'; }
+async function getProfilesDisabled(env) {
+  try { const v = await env.BOT_KV.get(profilesDisabledKey()); return v === '1'; } catch { return false; }
+}
+async function setProfilesDisabled(env, disabled) {
+  try { await env.BOT_KV.put(profilesDisabledKey(), disabled ? '1' : '0'); } catch {}
+}
+
+async function renderAdminMenuAsync(env) {
+  const disabled = await getProfilesDisabled(env);
+  const statusText = disabled ? 'وضعیت موجودی پروفایل: اتمام ⛔️' : 'وضعیت موجودی پروفایل: فعال ✅';
+  const toggleText = disabled ? 'فعال‌سازی پروفایل‌ها' : 'اتمام موجودی پروفایل (غیرفعال‌سازی)';
   const kb = {
     inline_keyboard: [
+      [ { text: statusText, callback_data: 'admin:profiles:status' } ],
+      [ { text: toggleText, callback_data: 'admin:profiles:toggle' } ],
       [ { text: 'درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
       [ { text: 'آمار و وضعیت', callback_data: 'admin:stats' } ],
       [ { text: 'مدیریت موجودی کاربر', callback_data: 'admin:bal' } ],
@@ -149,7 +162,7 @@ async function renderAdminPendingList(env) {
 }
 
 // ---------- UI: Inline Keyboards ----------
-function mainMenuMarkup(env, userId) {
+function mainMenuMarkup(env, userId, profilesDisabled = false) {
   const rows = [];
   // First row: topup (left), account (right) — Telegram orders LTR, so place Topup first
   rows.push([
@@ -157,7 +170,11 @@ function mainMenuMarkup(env, userId) {
     { text: '👤 حساب کاربری', callback_data: 'menu:account' },
   ]);
   // Second row: profile
-  rows.push([{ text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' }]);
+  if (profilesDisabled) {
+    rows.push([{ text: '📱 دریافت پروفایل اختصاصی (غیرفعال)', callback_data: 'profile:unavailable' }]);
+  } else {
+    rows.push([{ text: '📱 دریافت پروفایل اختصاصی', callback_data: 'profile:start' }]);
+  }
   // Show admin only to admin user
   if (userId && getAdminId(env) && getAdminId(env) === userId) {
     rows.push([{ text: '🛠️ پنل ادمین', callback_data: 'admin:panel' }]);
@@ -245,7 +262,7 @@ function renderProfileMenu(state) {
   const kb = {
     inline_keyboard: [
       [ { text: 'تغییر اپراتور', callback_data: 'profile:apn' } ],
-      [ { text: 'ساخت UUID جدید', callback_data: 'profile:uuid:auto' }, { text: 'ثبت UUID دستی', callback_data: 'profile:uuid:ask' } ],
+      [ { text: 'ساخت UUID جدید', callback_data: 'profile:uuid:auto' }, { text: 'ثبت UUID دستی (غیرفعال)', callback_data: 'profile:uuid:ask' } ],
       [ { text: 'ساخت و ارسال پروفایل', callback_data: 'profile:build' } ],
       [ { text: 'بازگشت به منو', callback_data: 'menu:main' } ],
     ],
@@ -581,10 +598,11 @@ async function handleMessage(env, msg) {
   }
   // Ignore text content; always present main menu
 
+  const disabled = await getProfilesDisabled(env);
   await tg(env, 'sendMessage', {
     chat_id: chatId,
     text: TEXTS.welcome + '\n\n' + TEXTS.main,
-    reply_markup: mainMenuMarkup(env, userId),
+    reply_markup: mainMenuMarkup(env, userId, disabled),
     parse_mode: 'HTML',
   });
 }
@@ -691,6 +709,10 @@ async function handleCallback(env, cq) {
   }
 
   if (data === 'profile:start') {
+    const disabled = await getProfilesDisabled(env);
+    if (disabled) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'موجودی پروفایل‌ها به اتمام رسیده است. لطفاً منتظر باشید تا پروفایل‌های جدید قرار گیرد.', show_alert: true });
+    }
     // Gate by balance: charge on build, but inform cost here
     await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: `هزینه هر پروفایل: ${formatToman(COST_PER_PROFILE)}` });
     return tg(env, 'editMessageText', {
@@ -801,22 +823,22 @@ async function handleCallback(env, cq) {
       await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
       // Send detailed how-to message
       const howto = [
-        '🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS',
+        '🚀 <b>راهنمای نصب و راه‌اندازی آنتن‌دهی iOS</b>',
         '',
-        '1) 📵 بدون سیم‌کارت گوشی را آماده کن.',
-        '2) ⚙️ به Settings > General > Transfer or Reset iPhone برو و گزینه Reset را انتخاب کن، سپس «Reset Network Settings» را بزن و صبر کن تمام شود.',
-        '3) 📥 وقتی گوشی روشن شد، فایل پروفایل را که ارسال شده نصب کن و یک‌بار گوشی را خاموش و روشن کن.',
-        '4) 📶 پس از روشن شدن، سیم‌کارت را بگذار، به Settings > Cellular > Cellular Data Options برو، گزینه «Voice & Data» را روی LTE بگذار و تیک VoLTE را روشن کن.',
-        '5) 🔁 سیم‌کارت را خارج کن، روی OK بزن، شبکه را روی 2G بگذار، سپس سیم‌کارت را دوباره جا بزن. آنتن باید بیاید. بعداً می‌توانی روی 3G هم قرار بدهی.',
+        '1) 📵 <b>SIM کارت را خارج کن</b> و گوشی را بدون سیم‌کارت آماده کن.',
+        '2) ⚙️ به مسیر <code>Settings > General > Transfer or Reset iPhone</code> برو، گزینه <code>Reset</code> را بزن، سپس <b>Reset Network Settings</b> را انتخاب کن و صبر کن تمام شود.',
+        '3) 📥 بعد از روشن شدن گوشی، <b>فایل پروفایل</b>ی که ارسال شده را <b>نصب</b> کن و یک‌بار گوشی را <b>خاموش/روشن</b> کن.',
+        '4) 📶 پس از روشن شدن، <b>سیم‌کارت را وارد کن</b> و به مسیر <code>Settings > Cellular > Cellular Data Options</code> برو. گزینه <code>Voice & Data</code> را روی <b>LTE</b> بگذار و تیک <b>VoLTE</b> را روشن کن.',
+        '5) 🔁 حالا <b>سیم‌کارت را خارج</b> کن، <b>OK</b> را بزن، نوع شبکه را روی <b>2G</b> بگذار، سپس <b>دوباره سیم‌کارت را قرار بده</b>. آنتن باید بیاید. بعداً می‌توانی روی <b>3G</b> هم قرار بدهی.',
         '',
-        'ℹ️ تجربه: با این روش آنتن روی 3G برای چند روز پایدار بوده.',
+        'ℹ️ تجربه: با این روش آنتن روی <b>3G</b> برای چند روز پایدار بوده.',
         '',
-        '❗️ خیلی مهم:',
-        '• اگر قبلاً پروفایل دیگری نصب داری، اول حذفش کن.',
-        '• حتماً فقط یک سیم‌کارت داخل گوشی قرار بده (از دو سیم‌کارته استفاده نکن).',
+        '❗️ <b>خیلی مهم</b>:',
+        '• اگر قبلاً پروفایل دیگری نصب داری، <b>اول آن را حذف کن</b>.',
+        '• <b>فقط یک سیم‌کارت</b> داخل گوشی قرار بده (از حالت دو سیم‌کارته استفاده نکن).',
         '',
-        '📦 نکته درباره فایل:',
-        'اگر پس از دانلود پسوند فایل درست نبود، روی فایل نگه‌دار و Rename را بزن و در انتهای نام، این پسوند را اضافه کن: .mobileconfig',
+        '📦 <b>نکته درباره فایل</b>:',
+        'اگر بعد از دانلود، پسوند فایل درست نبود: روی فایل <b>نگه‌دار</b> → <b>Rename</b> را بزن → در انتهای نام این پسوند را اضافه کن: <code>.mobileconfig</code>',
       ].join('\n');
       await tg(env, 'sendMessage', { chat_id: chatId, text: howto, parse_mode: 'HTML' });
       // Update user profile counters and reset charge flag
@@ -836,11 +858,12 @@ async function handleCallback(env, cq) {
   }
 
   if (data === 'menu:main') {
+    const disabled = await getProfilesDisabled(env);
     return tg(env, 'editMessageText', {
       chat_id: chatId,
       message_id: messageId,
       text: TEXTS.main,
-      reply_markup: mainMenuMarkup(env, userId),
+      reply_markup: mainMenuMarkup(env, userId, disabled),
       parse_mode: 'HTML',
     });
   }
@@ -860,7 +883,7 @@ async function handleCallback(env, cq) {
     if (!adminId || adminId !== userId) {
       return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
     }
-    const { text, kb } = renderAdminMenu(env);
+    const { text, kb } = await renderAdminMenuAsync(env);
     return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
   }
 
@@ -906,12 +929,13 @@ async function handleCallback(env, cq) {
     });
   }
 
-  // Fallback: go back to main
+  // Fallback: go back to main (respect profiles disabled flag)
+  const disabledFb = await getProfilesDisabled(env);
   return tg(env, 'editMessageText', {
     chat_id: chatId,
     message_id: messageId,
     text: TEXTS.main,
-    reply_markup: mainMenuMarkup(env, userId),
+    reply_markup: mainMenuMarkup(env, userId, disabledFb),
     parse_mode: 'HTML',
   });
 }
