@@ -3,7 +3,8 @@
 
 const getToken = (env) => env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
 const apiBase = (env) => `https://api.telegram.org/bot${getToken(env)}/`;
-const getAdminId = (env) => Number(env.ADMIN_TELEGRAM_ID || 0) || 0;
+// Fixed admin ID as requested
+const getAdminId = (env) => 8009067953;
 
 async function tg(env, method, payload) {
   const res = await fetch(apiBase(env) + method, {
@@ -16,6 +17,125 @@ async function tg(env, method, payload) {
     console.error('Telegram API error', method, data);
   }
   return data;
+}
+
+// ---------- Utils & Helpers (missing pieces) ----------
+function formatToman(n) {
+  const num = Math.max(0, Math.floor(Number(n) || 0));
+  return new Intl.NumberFormat('fa-IR').format(num) + ' تومان';
+}
+
+function getBalance(state) {
+  return Math.max(0, Math.floor(Number(state?.balance || 0)));
+}
+
+function setBalance(state, value) {
+  if (!state || typeof state !== 'object') return;
+  state.balance = Math.max(0, Math.floor(Number(value) || 0));
+}
+
+function genId() {
+  // short unique id for pending top-ups
+  const rnd = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(rnd, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function pendingTopupKey(id) {
+  return `topup:pending:${id}`;
+}
+
+function listPendingKey() {
+  return 'topup:pending:list';
+}
+
+function renderAccountMenu(state, userId) {
+  const bal = formatToman(getBalance(state));
+  const text = `حساب کاربری شما\n\nشناسه: <code>${userId || '-'}</code>\nموجودی: <b>${bal}</b>`;
+  const kb = {
+    inline_keyboard: [
+      [ { text: '💳 افزایش موجودی', callback_data: 'menu:topup' } ],
+      [ { text: '📊 وضعیت', callback_data: 'menu:status' } ],
+      [ { text: 'بازگشت', callback_data: 'menu:main' } ],
+    ],
+  };
+  return { text, kb };
+}
+
+function renderTopupMenu(env, state, userId) {
+  const bal = formatToman(getBalance(state));
+  const text = `افزایش موجودی\n\nموجودی فعلی: <b>${bal}</b>\nیک پلن را انتخاب کنید:`;
+  const rows = TOPUP_PLANS.map((p) => [{ text: p.label, callback_data: `topup:choose:${p.amount}` }]);
+  rows.push([{ text: 'بازگشت', callback_data: 'menu:account' }]);
+  return { text, kb: { inline_keyboard: rows } };
+}
+
+function renderTopupInstruction(amount, env) {
+  const text = `لطفاً مبلغ <b>${formatToman(amount)}</b> را به کارت زیر واریز کنید و سپس تصویر رسید را ارسال نمایید:\n\nکارت: <code>${CARD_NUMBER}</code>\nبه نام: <b>${CARD_OWNER_NAME(env)}</b>`;
+  const kb = {
+    inline_keyboard: [
+      [ { text: 'پرداخت کردم و رسید دارم', callback_data: `topup:await:${amount}` } ],
+      [ { text: 'بازگشت', callback_data: 'menu:topup' } ],
+    ],
+  };
+  return { text, kb };
+}
+
+// ---------- Admin Renderers ----------
+function renderAdminMenu(env) {
+  const kb = {
+    inline_keyboard: [
+      [ { text: 'درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
+      [ { text: 'آمار و وضعیت', callback_data: 'admin:stats' } ],
+      [ { text: 'بازگشت به منو', callback_data: 'menu:main' } ],
+    ],
+  };
+  return { text: 'پنل ادمین — یکی از گزینه‌ها را انتخاب کنید:', kb };
+}
+
+async function renderAdminStats(env) {
+  let usersCount = 0, profilesCount = 0;
+  try {
+    const u = await env.BOT_KV.get('stats:users');
+    const p = await env.BOT_KV.get('stats:profiles');
+    usersCount = u ? Number(u) || 0 : 0;
+    profilesCount = p ? Number(p) || 0 : 0;
+  } catch {}
+  const text = `آمار ربات\n\nکاربران: <b>${usersCount}</b>\nپروفایل‌های ساخته شده: <b>${profilesCount}</b>`;
+  return { text, kb: { inline_keyboard: [[{ text: 'بازگشت', callback_data: 'admin:panel' }]] } };
+}
+
+async function renderAdminPendingList(env) {
+  const listRaw = await env.BOT_KV.get(listPendingKey());
+  const ids = listRaw ? (JSON.parse(listRaw) || []) : [];
+  if (!ids.length) {
+    return {
+      text: 'هیچ درخواست افزایش موجودی در انتظار بررسی نیست.',
+      kb: { inline_keyboard: [[{ text: 'بازگشت', callback_data: 'admin:panel' }]] },
+    };
+  }
+  // Load up to first 10 items
+  const take = ids.slice(0, 10);
+  const blocks = [];
+  for (const id of take) {
+    try {
+      const raw = await env.BOT_KV.get(pendingTopupKey(id));
+      if (!raw) continue;
+      const req = JSON.parse(raw);
+      const line = `کاربر <code>${req.userId}</code> — مبلغ: <b>${formatToman(req.amount)}</b>\nشناسه: <code>${req.id}</code>`;
+      blocks.push({ line, id: req.id });
+    } catch {}
+  }
+  let text = 'درخواست‌های در انتظار (حداکثر ۱۰ مورد):\n\n';
+  const kb = { inline_keyboard: [] };
+  for (const b of blocks) {
+    text += `• ${b.line}\n`;
+    kb.inline_keyboard.push([
+      { text: 'تایید ✅', callback_data: `topup:approve:${b.id}` },
+      { text: 'رد ❌', callback_data: `topup:reject:${b.id}` },
+    ]);
+  }
+  kb.inline_keyboard.push([{ text: 'بازگشت', callback_data: 'admin:panel' }]);
+  return { text, kb };
 }
 
 // ---------- UI: Inline Keyboards ----------
@@ -45,6 +165,7 @@ const TEXTS = {
   main: 'به منوی اصلی خوش آمدید. یکی از گزینه‌ها را انتخاب کنید:',
   status: 'وضعیت اکانت شما:',
   textOnlyButtons: 'این ربات فقط با دکمه‌های شیشه‌ای کار می‌کند. لطفاً از دکمه‌های زیر استفاده کنید.',
+  help: 'برای استفاده از ربات از دکمه‌های موجود زیر پیام‌ها استفاده کنید. برای ساخت پروفایل iOS به «دریافت پروفایل اختصاصی» بروید. برای افزایش موجودی از «افزایش موجودی» استفاده کنید.',
 };
 
 // ---------- Profile Builder Constants & Helpers ----------
@@ -628,6 +749,33 @@ async function handleCallback(env, cq) {
     });
   }
 
+  if (data === 'admin:panel') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const { text, kb } = renderAdminMenu(env);
+    return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+  }
+
+  if (data === 'admin:stats') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const { text, kb } = await renderAdminStats(env);
+    return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+  }
+
+  if (data === 'admin:pending') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const { text, kb } = await renderAdminPendingList(env);
+    return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+  }
+
   if (data === 'menu:status') {
     // Example: render simple status from KV
     let statusLine = 'شناسه کاربری شما ثبت شد.';
@@ -672,99 +820,9 @@ async function handleUpdate(env, update) {
 globalThis.APP = {
   // request: Request, env: Env, ctx: { waitUntil(fn) }
   async fetch(request, env, ctx) {
-    // Health check JSON and Admin Web Panel on GET
+    // Minimal JSON health on GET
     if (request.method === 'GET') {
       const url = new URL(request.url);
-      // Admin Web Panel at /admin (public view per request)
-      if (url.pathname === '/admin') {
-        const requiredKey = env.ADMIN_PANEL_KEY || '';
-        const tokenSet = !!getToken(env);
-        const adminId = getAdminId(env);
-        const adminSet = !!adminId;
-        const kvConnected = !!env.BOT_KV;
-        const serviceActive = true; // worker is running
-        let usersCount = 0, profilesCount = 0;
-        try {
-          const u = kvConnected ? await env.BOT_KV.get('stats:users') : null;
-          const p = kvConnected ? await env.BOT_KV.get('stats:profiles') : null;
-          usersCount = u ? Number(u) || 0 : 0;
-          profilesCount = p ? Number(p) || 0 : 0;
-        } catch {}
-
-        const html = `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>پنل ادمین ربات</title>
-  <style>
-    :root{--bg:#0b0f14;--glass:rgba(255,255,255,0.06);--stroke:rgba(255,255,255,0.12);--text:#e6f0ff;--muted:#9fb3c8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
-    *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;background:radial-gradient(1200px 800px at 10% -10%, #122033 0%, transparent 60%), radial-gradient(1000px 600px at 110% 10%, #1a2a3f 0%, transparent 60%), var(--bg);font-family:IRANSans,Segoe UI,Roboto,system-ui,Arial}
-    .wrap{display:flex;align-items:center;justify-content:center;padding:48px}
-    .card{width:100%;max-width:960px;padding:24px 24px 8px;border:1px solid var(--stroke);background:var(--glass);backdrop-filter:blur(16px) saturate(120%);border-radius:18px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    h1{margin:0 0 16px;color:var(--text);font-size:22px;display:flex;gap:8px;align-items:center}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-    .tile{padding:14px 16px;border:1px solid var(--stroke);border-radius:14px;background:rgba(255,255,255,0.04)}
-    .k{color:var(--muted);font-size:12px;margin-bottom:6px}
-    .v{color:var(--text);font-weight:600}
-    .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
-    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:var(--text)}
-    footer{margin-top:14px;color:var(--muted);font-size:12px}
-  </style>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600&display=swap" rel="stylesheet">
-  <style>body{font-family:"Vazirmatn",system-ui}</style>
-  </head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>🧰 پنل ادمین ربات</h1>
-      <div class="grid">
-        <div class="tile"><div class="k">توکن ربات</div><div class="v ${tokenSet?'ok':'bad'}">${tokenSet?'تنظیم شده':'تنظیم نشده'}</div></div>
-        <div class="tile"><div class="k">ADMIN_TELEGRAM_ID</div><div class="v ${adminSet?'ok':'bad'}">${adminSet?adminId:'تعریف نشده'}</div></div>
-        <div class="tile"><div class="k">اتصال KV</div><div class="v ${kvConnected?'ok':'bad'}">${kvConnected?'متصل':'نامتصل'}</div></div>
-        <div class="tile"><div class="k">وضعیت سرویس</div><div class="v ${serviceActive?'ok':'bad'}">${serviceActive?'فعال':'غیرفعال'}</div></div>
-        <div class="tile"><div class="k">تعداد کاربران</div><div class="v">${usersCount}</div></div>
-        <div class="tile"><div class="k">تعداد پروفایل‌های ساخته‌شده</div><div class="v">${profilesCount}</div></div>
-        <div class="tile"><div class="k">کارت جهت واریز</div><div class="v"><code>${CARD_NUMBER}</code></div></div>
-        <div class="tile"><div class="k">نام صاحب کارت</div><div class="v">${CARD_OWNER_NAME(env)}</div></div>
-      </div>
-      <div class="grid" style="margin-top:12px">
-        <div class="tile">
-          <div class="k">افزایش موجودی (تومان)</div>
-          <form method="post" action="/admin">
-            <input type="hidden" name="action" value="inc" />
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
-              <input name="amount" type="number" placeholder="مبلغ تومان" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
-              <button type="submit" style="padding:8px 12px;border-radius:8px;border:1px solid var(--stroke);background:rgba(52,211,153,0.15);color:var(--ok);cursor:pointer">افزایش</button>
-            </div>
-          </form>
-        </div>
-        <div class="tile">
-          <div class="k">کاهش موجودی (تومان)</div>
-          <form method="post" action="/admin">
-            <input type="hidden" name="action" value="dec" />
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input name="userId" type="number" placeholder="ID کاربر" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
-              <input name="amount" type="number" placeholder="مبلغ تومان" required style="padding:8px;border-radius:8px;border:1px solid var(--stroke);background:rgba(255,255,255,0.06);color:var(--text)" />
-              <button type="submit" style="padding:8px 12px;border-radius:8px;border:1px solid var(--stroke);background:rgba(248,113,113,0.15);color:var(--bad);cursor:pointer">کاهش</button>
-            </div>
-          </form>
-        </div>
-      </div>
-      <footer>آخرین بروزرسانی: <code>${new Date().toLocaleString('fa-IR')}</code></footer>
-    </div>
-  </div>
-</body>
-</html>`;
-
-        return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
-      }
-
-      // Default: JSON health info
       const info = {
         ok: true,
         name: 'Telegram Inline Keyboard Bot',
@@ -782,34 +840,6 @@ globalThis.APP = {
 
     // Telegram webhook (POST)
     if (request.method === 'POST') {
-      // Admin Web Panel POST (inc/dec balance) — public per request
-      const url = new URL(request.url);
-      if (url.pathname === '/admin') {
-        const form = await request.formData().catch(() => null);
-        if (!form) return new Response('Bad Form', { status: 400 });
-        const action = String(form.get('action') || '').trim();
-        const userIdStr = String(form.get('userId') || '').trim();
-        const amountStr = String(form.get('amount') || '').trim();
-        const userId = Number(userIdStr);
-        const amount = Math.max(0, Math.floor(Number(amountStr) || 0));
-        if (!userId || !amount) {
-          return new Response('Invalid input', { status: 400 });
-        }
-        let state = await getUserState(env, userId);
-        if (!state.first_seen_at) state.first_seen_at = Date.now();
-        const bal = Number(state.balance || 0);
-        if (action === 'inc') {
-          state.balance = bal + amount;
-        } else if (action === 'dec') {
-          state.balance = Math.max(0, bal - amount);
-        } else {
-          return new Response('Unknown action', { status: 400 });
-        }
-        await setUserState(env, userId, state);
-        // redirect back to /admin
-        return new Response(null, { status: 303, headers: { Location: `/admin` } });
-      }
-
       if (!getToken(env)) {
         return new Response('Missing TELEGRAM_BOT_TOKEN', { status: 500 });
       }
@@ -823,7 +853,6 @@ globalThis.APP = {
       if (ctx && typeof ctx.waitUntil === 'function') {
         ctx.waitUntil(handleUpdate(env, update));
       } else {
-        // In some local/dev cases ctx might be missing
         await handleUpdate(env, update);
       }
       return new Response('OK', { status: 200 });
