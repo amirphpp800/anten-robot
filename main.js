@@ -1196,22 +1196,25 @@ globalThis.APP = {
             return new Response('Expired or Not Found', { status: 404 });
           }
           if (isFile) {
-            if (payload.used) {
-              return new Response('Link already used', { status: 410 });
+            // enforce up to 3 downloads per link
+            const count = Number(payload.downloads || 0);
+            if (payload.used || count >= 3) {
+              return new Response('Download limit reached', { status: 410 });
             }
             const pin = url.searchParams.get('pin') || '';
             const cookies = parseCookies(request.headers.get('Cookie') || '');
             const sid = cookies['dlsid'] || '';
             const validSid = Array.isArray(payload.sids) && payload.sids.includes(sid);
             if (!pin || pin !== payload.pin || !validSid) {
-              const err = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><title>دسترسی نامعتبر</title><body style="font-family:Vazirmatn,Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px"><div style="max-width:720px;margin:0 auto;background:#111827;border-radius:14px;padding:24px"><h1>⛔️ دسترسی نامعتبر</h1><p>کد دانلود (PIN) یا نشست این صفحه معتبر نیست. لطفاً از طریق لینک و QR ارسال‌شده توسط ربات وارد شوید و کد صحیح را وارد کنید.</p></div></body></html>`;
+              const err = `<!doctype html><html lang=\"fa\" dir=\"rtl\"><meta charset=\"utf-8\"><title>دسترسی نامعتبر</title><body style=\"font-family:Vazirmatn,Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px\"><div style=\"max-width:720px;margin:0 auto;background:#111827;border-radius:14px;padding:24px\"><h1>⛔️ دسترسی نامعتبر</h1><p>کد دانلود (PIN) یا نشست این صفحه معتبر نیست. لطفاً از طریق لینک و QR ارسال‌شده توسط ربات وارد شوید و کد صحیح را وارد کنید.</p></div></body></html>`;
               return new Response(err, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
             }
-            // Mark as used (single-use download)
+            // Mark usage and persist (allow up to 3 downloads)
             try {
-              payload.used = true;
-              payload.sids = [];
-              await env.BOT_KV.put(dlProfileKey(id), JSON.stringify(payload), { expirationTtl: 15 * 60 });
+              const next = count + 1;
+              payload.downloads = next;
+              if (next >= 3) payload.used = true;
+              await env.BOT_KV.put(dlProfileKey(id), JSON.stringify(payload), { expirationTtl: 24 * 60 * 60 });
               // write download usage history
               if (payload.ownerId) {
                 await appendList(env, `downloads:history:${payload.ownerId}`, { id, at: Date.now() }, 200);
@@ -1229,6 +1232,7 @@ globalThis.APP = {
           // Landing HTML
           const base = getPublicBaseUrl(env) || '';
           const downloadHref = `${base}/dl/${id}/file`;
+          const remaining = 3 - Number((payload.downloads || 0));
           // Ensure we have a session id (sid) bound to this landing visit
           let setCookie = '';
           try {
@@ -1283,16 +1287,40 @@ globalThis.APP = {
     h1 { margin:0 0 8px 0; font-size:24px; letter-spacing:.2px; }
     p { margin: 10px 0; }
     .muted { color: var(--muted); }
-    .btn {
-      display:inline-block;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color:#071a14; padding:14px 18px; border-radius:12px;
-      text-decoration:none; font-weight:800; letter-spacing:.2px; border:none; cursor:pointer;
-      box-shadow: 0 6px 18px rgba(34,211,238,.25), 0 2px 8px rgba(16,185,129,.2);
-      transition: transform .15s ease, box-shadow .2s ease, opacity .2s ease;
+    /* Button 28 style */
+    .button-28 {
+      appearance: none;
+      background-color: transparent;
+      border: 2px solid #1A1A1A;
+      border-radius: 15px;
+      box-sizing: border-box;
+      color: #e5e7eb;
+      cursor: pointer;
+      display: inline-block;
+      font-family: Roobert,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol";
+      font-size: 16px;
+      font-weight: 600;
+      line-height: normal;
+      margin: 0;
+      min-height: 56px;
+      min-width: 0;
+      outline: none;
+      padding: 14px 22px;
+      text-align: center;
+      text-decoration: none;
+      transition: all 300ms cubic-bezier(.23, 1, 0.32, 1);
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+      width: 100%;
+      will-change: transform;
+      background: rgba(255,255,255,.04);
+      border-color: rgba(255,255,255,.2);
+      backdrop-filter: blur(8px);
     }
-    .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(34,211,238,.35), 0 4px 12px rgba(16,185,129,.25); }
-    .btn:active { transform: translateY(0); opacity:.95 }
+    .button-28:disabled { pointer-events: none; opacity:.6 }
+    .button-28:hover { color: #fff; background-color: #1A1A1A; box-shadow: rgba(0, 0, 0, 0.25) 0 8px 15px; transform: translateY(-2px); }
+    .button-28:active { box-shadow: none; transform: translateY(0); }
     .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
     .input {
       background: rgba(255,255,255,.06);
@@ -1327,10 +1355,10 @@ globalThis.APP = {
       <div class="field">
         <label for="pin">🔒 کد دانلود (PIN):</label>
         <input class="input" id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="مثلاً 123456">
-        <button class="btn" type="submit">⬇️ دانلود پروفایل (.mobileconfig)</button>
+        <button class="button-28" type="submit">⬇️ دانلود پروفایل (.mobileconfig)</button>
       </div>
     </form>
-    <p class="muted">توجه: لینک دانلود یک‌بار مصرف است. اگر منقضی شد، از ربات دوباره پروفایل بسازید.</p>
+    <p class="muted">توجه: این لینک حداکثر ۳ بار قابل استفاده است. دفعات باقی‌مانده: <strong>${remaining < 0 ? 0 : remaining}</strong></p>
     <hr/>
     <h2>📘 راهنما</h2>
     <pre style="white-space:pre-wrap; font-family: inherit;">
