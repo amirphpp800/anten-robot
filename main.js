@@ -10,6 +10,12 @@ const getAdminId = (env) => {
   return 8009067953; // fallback
 };
 
+function getPublicBaseUrl(env) {
+  const base = env.PUBLIC_BASE_URL || env.BASE_URL || '';
+  if (!base) return '';
+  return base.endsWith('/') ? base.slice(0, -1) : base;
+}
+
 async function tg(env, method, payload) {
   const res = await fetch(apiBase(env) + method, {
     method: 'POST',
@@ -50,6 +56,31 @@ function pendingTopupKey(id) {
 
 function listPendingKey() {
   return 'topup:pending:list';
+}
+
+function dlProfileKey(id) {
+  return `dl:profile:${id}`;
+}
+
+function genPin() {
+  // 6-digit numeric PIN as string
+  const n = Math.floor(100000 + Math.random() * 900000);
+  return String(n);
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  const parts = header.split(';');
+  for (const p of parts) {
+    const i = p.indexOf('=');
+    if (i > -1) {
+      const k = p.slice(0, i).trim();
+      const v = p.slice(i + 1).trim();
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 function labelForApn(value) {
@@ -806,6 +837,15 @@ async function handleCallback(env, cq) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: `هزینه ${formatToman(COST_PER_PROFILE)} از موجودی شما کسر شد. موجودی فعلی: <b>${formatToman(getBalance(state))}</b>`, parse_mode: 'HTML' });
       }
       const xml = buildMobileconfig({ rootUUID: p.rootUUID, apn: p.apn });
+      // Save a copy in KV for downloadable link (24h TTL) with PIN
+      const dlId = genId();
+      const pin = genPin();
+      try {
+        const payload = { ownerId: userId, xml, used: false, pin, at: Date.now() };
+        await env.BOT_KV.put(dlProfileKey(dlId), JSON.stringify(payload), { expirationTtl: 24 * 60 * 60 });
+      } catch (e) {
+        console.error('KV put (download profile) error', e);
+      }
       const form = new FormData();
       form.append('chat_id', String(chatId));
       const blob = new Blob([xml], { type: 'application/xml' });
@@ -820,6 +860,16 @@ async function handleCallback(env, cq) {
       await tgForm(env, 'sendDocument', form);
       // Remove previous menu/message after sending the profile
       await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
+      // Send download link and QR code if base URL configured
+      const base = getPublicBaseUrl(env);
+      if (base) {
+        const link = `${base}/dl/${dlId}`;
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `🔗 لینک صفحه دانلود و راهنما:\n${link}\n\n🔒 کد دانلود (PIN): <code>${pin}</code>`, parse_mode: 'HTML' });
+        const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(link)}`;
+        await tg(env, 'sendPhoto', { chat_id: chatId, photo: qrUrl, caption: '📱 با اسکن این QR کد، وارد صفحه دانلود و راهنما می‌شوی.' });
+      } else {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'ℹ️ برای نمایش لینک دانلود و QR، مقدار PUBLIC_BASE_URL را در تنظیمات محیطی ست کنید.' });
+      }
       // Send detailed how-to message
       const howto = [
         '🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS',
@@ -1034,9 +1084,159 @@ async function handleUpdate(env, update) {
 globalThis.APP = {
   // request: Request, env: Env, ctx: { waitUntil(fn) }
   async fetch(request, env, ctx) {
-    // Minimal JSON health on GET
+    // GET routes
     if (request.method === 'GET') {
       const url = new URL(request.url);
+      // Download landing: /dl/:id
+      if (url.pathname.startsWith('/dl/')) {
+        const parts = url.pathname.split('/').filter(Boolean);
+        const id = parts[1] || '';
+        const isFile = parts.length === 3 && parts[2] === 'file';
+        if (!id) {
+          return new Response('Not Found', { status: 404 });
+        }
+        try {
+          const raw = await env.BOT_KV.get(dlProfileKey(id));
+          if (!raw) {
+            return new Response('Expired or Not Found', { status: 404 });
+          }
+          const payload = (() => { try { return JSON.parse(raw); } catch { return null; } })();
+          if (!payload || typeof payload.xml !== 'string') {
+            return new Response('Expired or Not Found', { status: 404 });
+          }
+          if (isFile) {
+            if (payload.used) {
+              return new Response('Link already used', { status: 410 });
+            }
+            const pin = url.searchParams.get('pin') || '';
+            const cookies = parseCookies(request.headers.get('Cookie') || '');
+            const sid = cookies['dlsid'] || '';
+            const validSid = Array.isArray(payload.sids) && payload.sids.includes(sid);
+            if (!pin || pin !== payload.pin || !validSid) {
+              const err = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><title>دسترسی نامعتبر</title><body style="font-family:Vazirmatn,Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px"><div style="max-width:720px;margin:0 auto;background:#111827;border-radius:14px;padding:24px"><h1>⛔️ دسترسی نامعتبر</h1><p>کد دانلود (PIN) یا نشست این صفحه معتبر نیست. لطفاً از طریق لینک و QR ارسال‌شده توسط ربات وارد شوید و کد صحیح را وارد کنید.</p></div></body></html>`;
+              return new Response(err, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
+            }
+            // Mark as used (single-use download)
+            try {
+              payload.used = true;
+              payload.sids = [];
+              await env.BOT_KV.put(dlProfileKey(id), JSON.stringify(payload), { expirationTtl: 15 * 60 });
+            } catch {}
+            return new Response(payload.xml, {
+              status: 200,
+              headers: {
+                'content-type': 'application/x-apple-aspen-config',
+                'content-disposition': 'attachment; filename="config.mobileconfig"',
+                'cache-control': 'no-store',
+              },
+            });
+          }
+          // Landing HTML
+          const base = getPublicBaseUrl(env) || '';
+          const downloadHref = `${base}/dl/${id}/file`;
+          // Ensure we have a session id (sid) bound to this landing visit
+          let setCookie = '';
+          try {
+            const cookies = parseCookies(request.headers.get('Cookie') || '');
+            let sid = cookies['dlsid'];
+            if (!Array.isArray(payload.sids)) payload.sids = [];
+            if (!sid || !payload.sids.includes(sid)) {
+              sid = genId();
+              payload.sids.push(sid);
+              await env.BOT_KV.put(dlProfileKey(id), JSON.stringify(payload), { expirationTtl: 24 * 60 * 60 });
+              setCookie = `dlsid=${sid}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax`;
+            }
+          } catch {}
+          const html = `<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>دانلود پروفایل iOS</title>
+  <style>
+    body { font-family: Vazirmatn, Segoe UI, Tahoma, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
+    .card { max-width:720px; margin:0 auto; background:#111827; border-radius:14px; padding:24px; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+    h1 { margin-top:0; font-size:22px; }
+    .btn { display:inline-block; background:#10b981; color:#06291f; padding:14px 18px; border-radius:10px; text-decoration:none; font-weight:700; }
+    .btn:hover { background:#34d399; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; padding:2px 6px; border-radius:6px; color:#93c5fd; }
+    hr { border: none; border-top:1px solid #1f2937; margin:20px 0; }
+    .muted { color:#9ca3af; }
+    ul { line-height:1.8; }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap" rel="stylesheet">
+  <meta name="robots" content="noindex,nofollow" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <script>history.scrollRestoration = 'manual';</script>
+  </head>
+<body>
+  <div class="card">
+    <h1>🚀 راهنمای نصب و دانلود پروفایل iOS</h1>
+    <p>این صفحه مخصوص پروفایل اختصاصی شماست. روی دکمه زیر بزنید تا فایل دانلود شود.</p>
+    <form method="GET" action="${downloadHref}" style="margin:16px 0 8px 0;">
+      <label for="pin">🔒 کد دانلود (PIN):</label>
+      <input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required style="margin-inline-start:8px;padding:10px;border-radius:8px;border:none;outline:none;">
+      <button class="btn" type="submit">⬇️ دانلود پروفایل (.mobileconfig)</button>
+    </form>
+    <p class="muted">توجه: لینک دانلود یک‌بار مصرف است. اگر منقضی شد، از ربات دوباره پروفایل بسازید.</p>
+    <hr/>
+    <h2>📘 راهنما</h2>
+    <pre style="white-space:pre-wrap; font-family: inherit; background:#0b1220; padding:16px; border-radius:10px;">
+🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS
+
+مراحل نصب:
+ 1. 📵 بدون سیم‌کارت گوشی را آماده کن.
+ 2. ⚙️ به مسیر زیر برو:
+Settings → General → Transfer or Reset iPhone → Reset → Reset Network Settings
+و صبر کن تا کامل انجام شود.
+ 3. 📥 پس از روشن شدن گوشی، فایل پروفایل ارسال‌شده را نصب کن. سپس یک بار گوشی را خاموش و روشن کن.
+ 4. 📶 بعد از روشن شدن، سیم‌کارت را وارد کن و به مسیر زیر برو:
+Settings → Cellular → Cellular Data Options → Voice & Data
+حالت را روی LTE بگذار و تیک VoLTE را روشن کن.
+ 5. 🔁 حالا:
+  • سیم‌کارت را خارج کن.
+  • روی OK بزن.
+  • شبکه را روی 2G قرار بده.
+  • دوباره سیم‌کارت را جا بزن.
+✅ آنتن باید بیاید. (بعداً می‌توانی روی 3G هم قرار بدهی.)
+
+⸻
+
+ℹ️ تجربه:
+
+با این روش، آنتن روی 3G برای چند روز پایدار بوده است.
+
+⸻
+
+❗️ نکات مهم:
+ • اگر قبلاً پروفایل دیگری نصب کرده‌ای، حتماً اول حذفش کن.
+ • فقط یک سیم‌کارت داخل گوشی قرار بده (از حالت دو سیم‌کارته استفاده نکن).
+
+⸻
+
+📦 درباره فایل:
+
+بعد از دانلود حتما این کار رو انجام بده:
+ • روی فایل نگه‌دار.
+ • گزینه Rename را بزن.
+ • بعد از اسم config این رو اضافه کن حتی اگ این پسوند رو داشت👇
+.mobileconfig
+    </pre>
+  </div>
+</body>
+</html>`;
+          const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
+          if (setCookie) headers['set-cookie'] = setCookie;
+          return new Response(html, { status: 200, headers });
+        } catch (e) {
+          return new Response('Server Error', { status: 500 });
+        }
+      }
+      // Minimal JSON health for other GETs
       const info = {
         ok: true,
         name: 'Telegram Inline Keyboard Bot',
