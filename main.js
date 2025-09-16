@@ -15,6 +15,21 @@ function getPublicBaseUrl(env) {
   return base.endsWith('/') ? base.slice(0, -1) : base;
 }
 
+// Normalize Persian/Arabic digits and separators into ASCII integer
+function parseLocalizedInt(txt) {
+  if (typeof txt !== 'string') return NaN;
+  const map = {
+    '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9',
+    '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'
+  };
+  let s = txt.trim();
+  s = s.replace(/[۰-۹٠-٩]/g, d => map[d] || d);
+  s = s.replace(/[,\s_]/g, '');
+  const m = s.match(/^[+-]?\d+$/);
+  if (!m) return NaN;
+  return Number(s);
+}
+
 async function tg(env, method, payload) {
   const res = await fetch(apiBase(env) + method, {
     method: 'POST',
@@ -128,14 +143,36 @@ async function setProfilesDisabled(env, disabled) {
   try { await env.BOT_KV.put(profilesDisabledKey(), disabled ? '1' : '0'); } catch {}
 }
 
+// Admin settings: whether to send how-to and profile doc via Telegram
+function sendHowtoKey() { return 'config:send_howto'; }
+function sendProfileDocKey() { return 'config:send_profile_doc'; }
+async function getSendHowto(env) {
+  try { const v = await env.BOT_KV.get(sendHowtoKey()); return v == null ? false : v === '1'; } catch { return false; }
+}
+async function setSendHowto(env, v) {
+  try { await env.BOT_KV.put(sendHowtoKey(), v ? '1' : '0'); } catch {}
+}
+async function getSendProfileDoc(env) {
+  try { const v = await env.BOT_KV.get(sendProfileDocKey()); return v == null ? false : v === '1'; } catch { return false; }
+}
+async function setSendProfileDoc(env, v) {
+  try { await env.BOT_KV.put(sendProfileDocKey(), v ? '1' : '0'); } catch {}
+}
+
 async function renderAdminMenuAsync(env) {
   const disabled = await getProfilesDisabled(env);
   const statusText = disabled ? '📱 وضعیت پروفایل‌ها: اتمام ⛔️' : '📱 وضعیت پروفایل‌ها: فعال ✅';
   const toggleText = disabled ? '▶️ فعال‌سازی پروفایل‌ها' : '⏹️ اتمام موجودی پروفایل (غیرفعال‌سازی)';
+  const sendHowto = await getSendHowto(env);
+  const sendDoc = await getSendProfileDoc(env);
+  const howtoRow = [ { text: sendHowto ? '📝 ارسال آموزش: فعال ✅' : '📝 ارسال آموزش: غیرفعال ⛔️', callback_data: 'admin:settings:howto:toggle' } ];
+  const docRow = [ { text: sendDoc ? '📄 ارسال فایل پروفایل: فعال ✅' : '📄 ارسال فایل پروفایل: غیرفعال ⛔️', callback_data: 'admin:settings:profiledoc:toggle' } ];
   const kb = {
     inline_keyboard: [
       [ { text: '📊 آمار و وضعیت', callback_data: 'admin:stats' }, { text: '📥 درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
       [ { text: '👤💳 مدیریت موجودی کاربر', callback_data: 'admin:bal' } ],
+      howtoRow,
+      docRow,
       [ { text: statusText, callback_data: 'admin:profiles:status' } ],
       [ { text: toggleText, callback_data: 'admin:profiles:toggle' } ],
       [ { text: '⬅️ بازگشت به منو', callback_data: 'menu:main' } ],
@@ -553,8 +590,15 @@ async function handleMessage(env, msg) {
       if (adminId && adminId === userId) {
         const s = state.awaiting_admin;
         const text = (msg.text || '').trim();
+        // allow cancel via text
+        if (["لغو", "cancel", "/cancel", "انصراف"].includes(text)) {
+          state.awaiting_admin = undefined;
+          await setUserState(env, userId, state);
+          const { text: pText, kb } = await renderAdminMenuAsync(env);
+          return tg(env, 'sendMessage', { chat_id: chatId, text: pText, reply_markup: kb, parse_mode: 'HTML' });
+        }
         if (s.step === 'user') {
-          const targetId = Number(text);
+          const targetId = parseLocalizedInt(text);
           if (!targetId || !Number.isFinite(targetId)) {
             return tg(env, 'sendMessage', { chat_id: chatId, text: 'شناسه کاربر نامعتبر است. یک عدد ارسال کنید یا لغو کنید.', reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
           }
@@ -564,7 +608,8 @@ async function handleMessage(env, msg) {
           await setUserState(env, userId, state);
           return tg(env, 'sendMessage', { chat_id: chatId, text: `مبلغ را به تومان وارد کنید (${s.mode === 'inc' ? 'افزایش' : 'کاهش'}):`, reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
         } else if (s.step === 'amount') {
-          const amount = Math.max(0, Math.floor(Number(text) || 0));
+          const parsed = parseLocalizedInt(text);
+          const amount = Math.max(0, Math.floor(Number.isFinite(parsed) ? parsed : 0));
           if (!amount) {
             return tg(env, 'sendMessage', { chat_id: chatId, text: 'مبلغ نامعتبر است. یک عدد صحیح ارسال کنید یا لغو کنید.', reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
           }
@@ -877,18 +922,21 @@ async function handleCallback(env, cq) {
       }
       // index profile build for user
       try { await appendList(env, `profiles:index:${userId}`, { at: Date.now(), apn: p.apn, uuid: p.rootUUID, dlId }, 200); } catch {}
-      const form = new FormData();
-      form.append('chat_id', String(chatId));
-      const blob = new Blob([xml], { type: 'application/xml' });
-      form.append('document', blob, 'config.mobileconfig');
-      const caption = [
-        '📄 پروفایل ساخته شد و آماده نصب است.',
-        '📘 آموزش استفاده در پیام بعدی ارسال می‌شود.',
-        '⚠️ اگر قبلاً پروفایل نصب کرده‌ای، حتماً ابتدا آن را حذف کن.',
-        '‼️ حتماً فقط یک سیم‌کارت داخل گوشی قرار بده (Dual SIM نگذار).',
-      ].join('\n');
-      form.append('caption', caption);
-      await tgForm(env, 'sendDocument', form);
+      const shouldSendDoc = await getSendProfileDoc(env);
+      if (shouldSendDoc) {
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        const blob = new Blob([xml], { type: 'application/xml' });
+        form.append('document', blob, 'config.mobileconfig');
+        const caption = [
+          '📄 پروفایل ساخته شد و آماده نصب است.',
+          '📘 آموزش استفاده در پیام بعدی ارسال می‌شود.',
+          '⚠️ اگر قبلاً پروفایل نصب کرده‌ای، حتماً ابتدا آن را حذف کن.',
+          '‼️ حتماً فقط یک سیم‌کارت داخل گوشی قرار بده (Dual SIM نگذار).',
+        ].join('\n');
+        form.append('caption', caption);
+        await tgForm(env, 'sendDocument', form);
+      }
       // Remove previous menu/message after sending the profile
       await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
       // Send download link and QR code if base URL configured
@@ -902,7 +950,9 @@ async function handleCallback(env, cq) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'ℹ️ برای نمایش لینک دانلود و QR، مقدار PUBLIC_BASE_URL را در تنظیمات محیطی ست کنید.' });
       }
       // Send detailed how-to message
-      const howto = [
+      const shouldSendHowto = await getSendHowto(env);
+      if (shouldSendHowto) {
+        const howto = [
         '🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS',
         '',
         'مراحل نصب:',
@@ -942,8 +992,9 @@ async function handleCallback(env, cq) {
         ' • گزینه Rename را بزن.',
         ' • بعد از اسم config این رو اضافه کن حتی اگ این پسوند رو داشت👇',
         '.mobileconfig',
-      ].join('\n');
-      await tg(env, 'sendMessage', { chat_id: chatId, text: howto });
+        ].join('\n');
+        await tg(env, 'sendMessage', { chat_id: chatId, text: howto });
+      }
       // Update user profile counters and reset charge flag
       const st2 = await getUserState(env, userId);
       st2.profiles_built_count = Number(st2.profiles_built_count || 0) + 1;
@@ -962,6 +1013,10 @@ async function handleCallback(env, cq) {
 
   if (data === 'menu:main') {
     const disabled = await getProfilesDisabled(env);
+    // If admin, also clear any pending admin input flow
+    if (userId && getAdminId(env) === userId) {
+      try { const st = await getUserState(env, userId); if (st.awaiting_admin) { st.awaiting_admin = undefined; await setUserState(env, userId, st); } } catch {}
+    }
     return tg(env, 'editMessageText', {
       chat_id: chatId,
       message_id: messageId,
@@ -986,6 +1041,11 @@ async function handleCallback(env, cq) {
     if (!adminId || adminId !== userId) {
       return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
     }
+    // Clear any pending admin input flow to avoid stuck states
+    try {
+      const st = await getUserState(env, userId);
+      if (st.awaiting_admin) { st.awaiting_admin = undefined; await setUserState(env, userId, st); }
+    } catch {}
     const { text, kb } = await renderAdminMenuAsync(env);
     return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
   }
@@ -1189,15 +1249,65 @@ globalThis.APP = {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>دانلود پروفایل iOS</title>
   <style>
-    body { font-family: Vazirmatn, Segoe UI, Tahoma, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
-    .card { max-width:720px; margin:0 auto; background:#111827; border-radius:14px; padding:24px; box-shadow:0 8px 24px rgba(0,0,0,.4); }
-    h1 { margin-top:0; font-size:22px; }
-    .btn { display:inline-block; background:#10b981; color:#06291f; padding:14px 18px; border-radius:10px; text-decoration:none; font-weight:700; }
-    .btn:hover { background:#34d399; }
-    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; padding:2px 6px; border-radius:6px; color:#93c5fd; }
-    hr { border: none; border-top:1px solid #1f2937; margin:20px 0; }
-    .muted { color:#9ca3af; }
-    ul { line-height:1.8; }
+    :root {
+      --bg1: #0b0f19;
+      --bg2: #0a0c14;
+      --glass: rgba(255, 255, 255, 0.06);
+      --border: rgba(255, 255, 255, 0.16);
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #10b981;
+      --accent-2: #22d3ee;
+      --shadow: 0 10px 30px rgba(0,0,0,.45);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box }
+    body {
+      font-family: Vazirmatn, Segoe UI, Tahoma, sans-serif;
+      margin:0; padding:24px; color:var(--text);
+      min-height:100vh;
+      background: radial-gradient(1200px 800px at 80% -10%, rgba(34,211,238,.12), transparent 60%),
+                  radial-gradient(1000px 700px at -10% 100%, rgba(16,185,129,.10), transparent 60%),
+                  linear-gradient(180deg, var(--bg1), var(--bg2));
+    }
+    .shell { max-width: 860px; margin: 0 auto; }
+    .card {
+      margin:0 auto; border-radius: var(--radius);
+      background: var(--glass);
+      border: 1px solid var(--border);
+      padding: 28px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px) saturate(120%);
+      -webkit-backdrop-filter: blur(10px) saturate(120%);
+    }
+    h1 { margin:0 0 8px 0; font-size:24px; letter-spacing:.2px; }
+    p { margin: 10px 0; }
+    .muted { color: var(--muted); }
+    .btn {
+      display:inline-block;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color:#071a14; padding:14px 18px; border-radius:12px;
+      text-decoration:none; font-weight:800; letter-spacing:.2px; border:none; cursor:pointer;
+      box-shadow: 0 6px 18px rgba(34,211,238,.25), 0 2px 8px rgba(16,185,129,.2);
+      transition: transform .15s ease, box-shadow .2s ease, opacity .2s ease;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(34,211,238,.35), 0 4px 12px rgba(16,185,129,.25); }
+    .btn:active { transform: translateY(0); opacity:.95 }
+    .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .input {
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      border-radius: 12px;
+      outline: none;
+      box-shadow: inset 0 0 0 9999px rgba(255,255,255,0); /* avoid iOS autofill bg */
+      transition: border-color .2s ease, background .2s ease;
+    }
+    .input:focus { border-color: rgba(34,211,238,.55); background: rgba(255,255,255,.09); }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(255,255,255,.06); padding:2px 6px; border-radius:6px; color:#93c5fd; border:1px solid var(--border); }
+    hr { border: none; border-top:1px solid var(--border); margin:20px 0; }
+    pre { background: rgba(255,255,255,.04); border:1px solid var(--border); border-radius:12px; padding:16px; }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1209,18 +1319,21 @@ globalThis.APP = {
   <script>history.scrollRestoration = 'manual';</script>
   </head>
 <body>
+  <div class="shell">
   <div class="card">
     <h1>🚀 راهنمای نصب و دانلود پروفایل iOS</h1>
     <p>این صفحه مخصوص پروفایل اختصاصی شماست. روی دکمه زیر بزنید تا فایل دانلود شود.</p>
     <form method="GET" action="${downloadHref}" style="margin:16px 0 8px 0;">
-      <label for="pin">🔒 کد دانلود (PIN):</label>
-      <input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required style="margin-inline-start:8px;padding:10px;border-radius:8px;border:none;outline:none;">
-      <button class="btn" type="submit">⬇️ دانلود پروفایل (.mobileconfig)</button>
+      <div class="field">
+        <label for="pin">🔒 کد دانلود (PIN):</label>
+        <input class="input" id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="مثلاً 123456">
+        <button class="btn" type="submit">⬇️ دانلود پروفایل (.mobileconfig)</button>
+      </div>
     </form>
     <p class="muted">توجه: لینک دانلود یک‌بار مصرف است. اگر منقضی شد، از ربات دوباره پروفایل بسازید.</p>
     <hr/>
     <h2>📘 راهنما</h2>
-    <pre style="white-space:pre-wrap; font-family: inherit; background:#0b1220; padding:16px; border-radius:10px;">
+    <pre style="white-space:pre-wrap; font-family: inherit;">
 🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS
 
 مراحل نصب:
@@ -1261,6 +1374,7 @@ Settings → Cellular → Cellular Data Options → Voice & Data
  • بعد از اسم config این رو اضافه کن حتی اگ این پسوند رو داشت👇
 .mobileconfig
     </pre>
+  </div>
   </div>
 </body>
 </html>`;
