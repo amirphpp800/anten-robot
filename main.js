@@ -11,8 +11,7 @@ const getAdminId = (env) => {
 };
 
 function getPublicBaseUrl(env) {
-  const base = env.PUBLIC_BASE_URL || env.BASE_URL || '';
-  if (!base) return '';
+  const base = env.PUBLIC_BASE_URL || env.BASE_URL || 'https://anten-robot.pages.dev';
   return base.endsWith('/') ? base.slice(0, -1) : base;
 }
 
@@ -513,6 +512,33 @@ async function setUserState(env, userId, state) {
   }
 }
 
+// Append to a capped JSON list in KV (keeps last maxItems)
+async function appendList(env, key, item, maxItems = 50) {
+  try {
+    const raw = await env.BOT_KV.get(key);
+    const arr = raw ? (JSON.parse(raw) || []) : [];
+    arr.push(item);
+    const trimmed = arr.length > maxItems ? arr.slice(arr.length - maxItems) : arr;
+    await env.BOT_KV.put(key, JSON.stringify(trimmed));
+  } catch (e) {
+    console.error('appendList error', key, e);
+  }
+}
+
+// Consistently adjust user balance with clamping and persistence, with ledger logging
+async function adjustUserBalance(env, userId, delta, reason = 'adjust', meta = {}) {
+  const tState = await getUserState(env, userId);
+  if (!tState.first_seen_at) tState.first_seen_at = Date.now();
+  const before = getBalance(tState);
+  const after = Math.max(0, before + Math.floor(Number(delta) || 0));
+  setBalance(tState, after);
+  await setUserState(env, userId, tState);
+  // Log ledger entry in KV (last 100 entries)
+  const entry = { at: Date.now(), delta: Math.floor(Number(delta) || 0), before, after, reason, meta };
+  await appendList(env, `ledger:index:${userId}`, entry, 100);
+  return { before, after, state: tState };
+}
+
 // ---------- Handlers ----------
 async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
@@ -543,12 +569,8 @@ async function handleMessage(env, msg) {
             return tg(env, 'sendMessage', { chat_id: chatId, text: 'مبلغ نامعتبر است. یک عدد صحیح ارسال کنید یا لغو کنید.', reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] } });
           }
           const tId = s.targetUserId;
-          const tState = await getUserState(env, tId);
-          if (!tState.first_seen_at) tState.first_seen_at = Date.now();
-          const before = getBalance(tState);
-          const after = s.mode === 'inc' ? before + amount : Math.max(0, before - amount);
-          setBalance(tState, after);
-          await setUserState(env, tId, tState);
+          const delta = s.mode === 'inc' ? amount : -amount;
+          const { before, after } = await adjustUserBalance(env, tId, delta);
           // Clear awaiting
           state.awaiting_admin = undefined;
           await setUserState(env, userId, state);
@@ -594,6 +616,8 @@ async function handleMessage(env, msg) {
         await env.BOT_KV.put('stats:users', String(n + 1));
         state._counted_user = true;
       }
+      // index user in KV for faster listing (keeps last 5000 users)
+      try { await appendList(env, 'users:index', { id: userId, at: state.first_seen_at }, 5000); } catch {}
       await setUserState(env, userId, state);
     }
   }
@@ -611,6 +635,8 @@ async function handleMessage(env, msg) {
       const list = listRaw ? JSON.parse(listRaw) : [];
       list.push(pendingId);
       await env.BOT_KV.put(listPendingKey(), JSON.stringify(list));
+      // add to user's topup requests index
+      try { await appendList(env, `topup:index:${userId}`, { id: pendingId, amount, at: Date.now(), status: 'pending' }, 200); } catch {}
       state2.awaiting_receipt = false;
       state2.awaiting_receipt_amount = 0;
       await setUserState(env, userId, state2);
@@ -709,10 +735,10 @@ async function handleCallback(env, cq) {
     await env.BOT_KV.delete(pendingTopupKey(pendingId));
     if (isApprove) {
       // credit user
-      const uState = await getUserState(env, req.userId);
-      setBalance(uState, getBalance(uState) + Number(req.amount || 0));
-      await setUserState(env, req.userId, uState);
-      await tg(env, 'sendMessage', { chat_id: req.chatId, text: `واریز شما تایید شد. موجودی جدید: <b>${formatToman(getBalance(uState))}</b>`, parse_mode: 'HTML' });
+      const { after } = await adjustUserBalance(env, req.userId, Number(req.amount || 0));
+      await tg(env, 'sendMessage', { chat_id: req.chatId, text: `واریز شما تایید شد. موجودی جدید: <b>${formatToman(after)}</b>`, parse_mode: 'HTML' });
+      // mark in user's topup history
+      try { await appendList(env, `topup:history:${req.userId}`, { id: pendingId, amount: Number(req.amount||0), at: Date.now(), status: 'approved' }, 200); } catch {}
       // Replace buttons on the original admin message with a single status button
       await tg(env, 'editMessageReplyMarkup', {
         chat_id: chatId,
@@ -722,6 +748,7 @@ async function handleCallback(env, cq) {
       await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'درخواست تایید شد.' });
     } else {
       await tg(env, 'sendMessage', { chat_id: req.chatId, text: 'متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی در ارتباط باشید یا مجدداً تلاش کنید.' });
+      try { await appendList(env, `topup:history:${req.userId}`, { id: pendingId, amount: Number(req.amount||0), at: Date.now(), status: 'rejected' }, 200); } catch {}
       await tg(env, 'editMessageReplyMarkup', {
         chat_id: chatId,
         message_id: messageId,
@@ -830,11 +857,13 @@ async function handleCallback(env, cq) {
             parse_mode: 'HTML',
           });
         }
-        setBalance(state, bal - COST_PER_PROFILE);
-        p._chargedOnce = true; // mark charged for current cycle
-        state.profile = p;
-        await setUserState(env, userId, state);
-        await tg(env, 'sendMessage', { chat_id: chatId, text: `هزینه ${formatToman(COST_PER_PROFILE)} از موجودی شما کسر شد. موجودی فعلی: <b>${formatToman(getBalance(state))}</b>`, parse_mode: 'HTML' });
+        const { state: latestState, after } = await adjustUserBalance(env, userId, -COST_PER_PROFILE);
+        // merge profile flags safely on the latest state to avoid overwriting balance
+        const newState = latestState || {};
+        newState.profile = newState.profile || {};
+        newState.profile = { ...newState.profile, ...p, _chargedOnce: true };
+        await setUserState(env, userId, newState);
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `هزینه ${formatToman(COST_PER_PROFILE)} از موجودی شما کسر شد. موجودی فعلی: <b>${formatToman(after)}</b>`, parse_mode: 'HTML' });
       }
       const xml = buildMobileconfig({ rootUUID: p.rootUUID, apn: p.apn });
       // Save a copy in KV for downloadable link (24h TTL) with PIN
@@ -846,6 +875,8 @@ async function handleCallback(env, cq) {
       } catch (e) {
         console.error('KV put (download profile) error', e);
       }
+      // index profile build for user
+      try { await appendList(env, `profiles:index:${userId}`, { at: Date.now(), apn: p.apn, uuid: p.rootUUID, dlId }, 200); } catch {}
       const form = new FormData();
       form.append('chat_id', String(chatId));
       const blob = new Blob([xml], { type: 'application/xml' });
@@ -1121,6 +1152,10 @@ globalThis.APP = {
               payload.used = true;
               payload.sids = [];
               await env.BOT_KV.put(dlProfileKey(id), JSON.stringify(payload), { expirationTtl: 15 * 60 });
+              // write download usage history
+              if (payload.ownerId) {
+                await appendList(env, `downloads:history:${payload.ownerId}`, { id, at: Date.now() }, 200);
+              }
             } catch {}
             return new Response(payload.xml, {
               status: 200,
