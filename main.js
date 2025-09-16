@@ -100,16 +100,15 @@ async function setProfilesDisabled(env, disabled) {
 
 async function renderAdminMenuAsync(env) {
   const disabled = await getProfilesDisabled(env);
-  const statusText = disabled ? 'وضعیت موجودی پروفایل: اتمام ⛔️' : 'وضعیت موجودی پروفایل: فعال ✅';
-  const toggleText = disabled ? 'فعال‌سازی پروفایل‌ها' : 'اتمام موجودی پروفایل (غیرفعال‌سازی)';
+  const statusText = disabled ? '📱 وضعیت پروفایل‌ها: اتمام ⛔️' : '📱 وضعیت پروفایل‌ها: فعال ✅';
+  const toggleText = disabled ? '▶️ فعال‌سازی پروفایل‌ها' : '⏹️ اتمام موجودی پروفایل (غیرفعال‌سازی)';
   const kb = {
     inline_keyboard: [
+      [ { text: '📊 آمار و وضعیت', callback_data: 'admin:stats' }, { text: '📥 درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
+      [ { text: '👤💳 مدیریت موجودی کاربر', callback_data: 'admin:bal' } ],
       [ { text: statusText, callback_data: 'admin:profiles:status' } ],
       [ { text: toggleText, callback_data: 'admin:profiles:toggle' } ],
-      [ { text: 'درخواست‌های افزایش موجودی', callback_data: 'admin:pending' } ],
-      [ { text: 'آمار و وضعیت', callback_data: 'admin:stats' } ],
-      [ { text: 'مدیریت موجودی کاربر', callback_data: 'admin:bal' } ],
-      [ { text: 'بازگشت به منو', callback_data: 'menu:main' } ],
+      [ { text: '⬅️ بازگشت به منو', callback_data: 'menu:main' } ],
     ],
   };
   return { text: 'پنل ادمین — یکی از گزینه‌ها را انتخاب کنید:', kb };
@@ -530,7 +529,7 @@ async function handleMessage(env, msg) {
             : `موجودی شما ${formatToman(amount)} کاهش یافت. موجودی جدید: ${formatToman(after)}`;
           await tg(env, 'sendMessage', { chat_id: tId, text: note });
           // Return to admin panel
-          const { text: pText, kb } = renderAdminMenu(env);
+          const { text: pText, kb } = await renderAdminMenuAsync(env);
           return tg(env, 'sendMessage', { chat_id: chatId, text: pText, reply_markup: kb, parse_mode: 'HTML' });
         }
       }
@@ -823,24 +822,47 @@ async function handleCallback(env, cq) {
       await tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
       // Send detailed how-to message
       const howto = [
-        '🚀 <b>راهنمای نصب و راه‌اندازی آنتن‌دهی iOS</b>',
+        '🚀 راهنمای نصب و راه‌اندازی آنتن‌دهی iOS',
         '',
-        '1) 📵 <b>SIM کارت را خارج کن</b> و گوشی را بدون سیم‌کارت آماده کن.',
-        '2) ⚙️ به مسیر <code>Settings > General > Transfer or Reset iPhone</code> برو، گزینه <code>Reset</code> را بزن، سپس <b>Reset Network Settings</b> را انتخاب کن و صبر کن تمام شود.',
-        '3) 📥 بعد از روشن شدن گوشی، <b>فایل پروفایل</b>ی که ارسال شده را <b>نصب</b> کن و یک‌بار گوشی را <b>خاموش/روشن</b> کن.',
-        '4) 📶 پس از روشن شدن، <b>سیم‌کارت را وارد کن</b> و به مسیر <code>Settings > Cellular > Cellular Data Options</code> برو. گزینه <code>Voice & Data</code> را روی <b>LTE</b> بگذار و تیک <b>VoLTE</b> را روشن کن.',
-        '5) 🔁 حالا <b>سیم‌کارت را خارج</b> کن، <b>OK</b> را بزن، نوع شبکه را روی <b>2G</b> بگذار، سپس <b>دوباره سیم‌کارت را قرار بده</b>. آنتن باید بیاید. بعداً می‌توانی روی <b>3G</b> هم قرار بدهی.',
+        'مراحل نصب:',
+        ' 1. 📵 بدون سیم‌کارت گوشی را آماده کن.',
+        ' 2. ⚙️ به مسیر زیر برو:',
+        'Settings → General → Transfer or Reset iPhone → Reset → Reset Network Settings',
+        'و صبر کن تا کامل انجام شود.',
+        ' 3. 📥 پس از روشن شدن گوشی، فایل پروفایل ارسال‌شده را نصب کن. سپس یک بار گوشی را خاموش و روشن کن.',
+        ' 4. 📶 بعد از روشن شدن، سیم‌کارت را وارد کن و به مسیر زیر برو:',
+        'Settings → Cellular → Cellular Data Options → Voice & Data',
+        'حالت را روی LTE بگذار و تیک VoLTE را روشن کن.',
+        ' 5. 🔁 حالا:',
+        '  • سیم‌کارت را خارج کن.',
+        '  • روی OK بزن.',
+        '  • شبکه را روی 2G قرار بده.',
+        '  • دوباره سیم‌کارت را جا بزن.',
+        '✅ آنتن باید بیاید. (بعداً می‌توانی روی 3G هم قرار بدهی.)',
         '',
-        'ℹ️ تجربه: با این روش آنتن روی <b>3G</b> برای چند روز پایدار بوده.',
+        '⸻',
         '',
-        '❗️ <b>خیلی مهم</b>:',
-        '• اگر قبلاً پروفایل دیگری نصب داری، <b>اول آن را حذف کن</b>.',
-        '• <b>فقط یک سیم‌کارت</b> داخل گوشی قرار بده (از حالت دو سیم‌کارته استفاده نکن).',
+        'ℹ️ تجربه:',
         '',
-        '📦 <b>نکته درباره فایل</b>:',
-        'اگر بعد از دانلود، پسوند فایل درست نبود: روی فایل <b>نگه‌دار</b> → <b>Rename</b> را بزن → در انتهای نام این پسوند را اضافه کن: <code>.mobileconfig</code>',
+        'با این روش، آنتن روی 3G برای چند روز پایدار بوده است.',
+        '',
+        '⸻',
+        '',
+        '❗️ نکات مهم:',
+        ' • اگر قبلاً پروفایل دیگری نصب کرده‌ای، حتماً اول حذفش کن.',
+        ' • فقط یک سیم‌کارت داخل گوشی قرار بده (از حالت دو سیم‌کارته استفاده نکن).',
+        '',
+        '⸻',
+        '',
+        '📦 درباره فایل:',
+        '',
+        'بعد از دانلود حتما این کار رو انجام بده:',
+        ' • روی فایل نگه‌دار.',
+        ' • گزینه Rename را بزن.',
+        ' • بعد از اسم config این رو اضافه کن حتی اگ این پسوند رو داشت👇',
+        '.mobileconfig',
       ].join('\n');
-      await tg(env, 'sendMessage', { chat_id: chatId, text: howto, parse_mode: 'HTML' });
+      await tg(env, 'sendMessage', { chat_id: chatId, text: howto });
       // Update user profile counters and reset charge flag
       const st2 = await getUserState(env, userId);
       st2.profiles_built_count = Number(st2.profiles_built_count || 0) + 1;
@@ -903,6 +925,61 @@ async function handleCallback(env, cq) {
     }
     const { text, kb } = await renderAdminPendingList(env);
     return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+  }
+
+  if (data === 'admin:profiles:status') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const disabled = await getProfilesDisabled(env);
+    const msg = disabled ? 'وضعیت پروفایل‌ها: اتمام موجودی ⛔️' : 'وضعیت پروفایل‌ها: فعال ✅';
+    return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: msg, show_alert: true });
+  }
+
+  if (data === 'admin:profiles:toggle') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const disabled = await getProfilesDisabled(env);
+    await setProfilesDisabled(env, !disabled);
+    const { text, kb } = await renderAdminMenuAsync(env);
+    await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb, parse_mode: 'HTML' });
+    return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: !disabled ? 'پروفایل‌ها غیرفعال شد.' : 'پروفایل‌ها فعال شد.' });
+  }
+
+  if (data === 'admin:bal') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const text = 'مدیریت موجودی کاربر — یک عمل را انتخاب کنید:';
+    const kb = {
+      inline_keyboard: [
+        [ { text: '➕ افزایش موجودی', callback_data: 'admin:bal:inc' }, { text: '➖ کاهش موجودی', callback_data: 'admin:bal:dec' } ],
+        [ { text: '⬅️ بازگشت', callback_data: 'admin:panel' } ],
+      ],
+    };
+    return tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, text, reply_markup: kb });
+  }
+
+  if (data === 'admin:bal:inc' || data === 'admin:bal:dec') {
+    const adminId = getAdminId(env);
+    if (!adminId || adminId !== userId) {
+      return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: 'دسترسی مجاز نیست.', show_alert: true });
+    }
+    const mode = data.endsWith(':inc') ? 'inc' : 'dec';
+    const state = await getUserState(env, userId);
+    state.awaiting_admin = { step: 'user', mode };
+    await setUserState(env, userId, state);
+    const ask = `شناسه عددی کاربر را وارد کنید (${mode === 'inc' ? 'افزایش' : 'کاهش'} موجودی):`;
+    return tg(env, 'editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text: ask,
+      reply_markup: { inline_keyboard: [[{ text: 'لغو', callback_data: 'admin:panel' }]] },
+    });
   }
 
   if (data === 'menu:status') {
